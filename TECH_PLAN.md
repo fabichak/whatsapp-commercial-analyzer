@@ -1,0 +1,695 @@
+# Task breakdown for the Spa WhatsApp Analyzer pipeline
+
+## Context
+
+`PLAN.md`  specifies the architecture of an 8-stage pipeline that analyzes 28k spa-sales WhatsApp messages to produce a PT-BR Markdown report plus CSV artifacts. The spec is solid but written at a design level — a developer reading it today cannot start pulling tickets. This plan breaks `PLAN.md` into **dev-ticket-grain tasks** (~2–6h each) with inputs, outputs, acceptance criteria, and a concrete verification command per task.
+
+The repo is **greenfield**: only `PLAN.md`, `script-comercial.md`, and `msgstore.db` exist. No `src/`, no `pyproject.toml`, no tests yet.
+
+### Goals of this breakdown
+1. Make every stage **pickable**: a developer can start any task without re-reading the whole spec.
+2. Front-load **business value**: a stakeholder-visible `output/report.md` exists by end of day 1 (even if hollow), so the loop "tune prompts → regenerate → read report" starts immediately.
+3. Keep tests **cheap and honest**: pytest for pure logic, smoke scripts for everything LLM-dependent.
+4. Stay under the **$10 LLM budget** by gating full-corpus runs behind a passing 5-chat dry run.
+
+### Decisions recorded from user
+- **Test style:** pragmatic mix — pytest for pure logic (`load`, `dedupe`, `cluster`, `script_index`, `llm`), executable smoke scripts (`scripts/verify_stageN.py`) for LLM stages.
+- **Build order:** vertical slice first (M1: thin E2E with stubbed LLM stages), then deepen stage by stage (M2).
+- **Ground truth:** user will hand over a CSV of ~10 chat_ids with known outcomes (booked / lost / ambiguous) for Stage 6 calibration.
+- **Task grain:** dev-ticket (~2–6h), with file paths, function signatures, verification commands.
+
+### Corrections to `PLAN.md`
+These are noted so the developer doesn't get stuck:
+
+1. **Path typo in file layout** — `PLAN.md` §"File layout" writes `/home/martin/aicommerce-analyser/`; the real working directory is `/home/martin/whatsapp-commercial-analyzer/`. Use the latter.
+2. **Day-Spa pitch is NOT missing** — `script-comercial.md` has a "Day Spa" section (2h and 3h variants, Essência Puris / Conexão / Pausa Entre Amigas / Imersão Puris / Ritual de Conexão / Celebração) with a price block. Stage 3 should **re-structure** this existing content into `script.yaml`, not invent it. Expansion via LLM should still propose missing pieces (transition phrasing, upsell hooks).
+3. **Step IDs are non-contiguous:** `1, 2, 3, 3.5, 5, 6, 7` — there is no step 4. Parser must not assume monotonic integer IDs. Store ids as strings.
+4. **Sentiment rubric mismatch:** `PLAN.md` §Stage 5 text lists `warmth, clarity, script_adherence, polarity, critique`; the Stage 5 test block lists `warmth, clarity, assertiveness`. **Canonical:** `warmth (1–5), clarity (1–5), script_adherence (1–5), polarity (pos/neu/neg), critique (PT-BR string)`.
+5. **Promoções section exists:** `script-comercial.md` has a "PROMOÇÕES DE DIA DAS MÃES" block with time-bound offers (sales 16/04–17/05, valid until 31/06). Stage 3 must capture these with `valid_from` / `valid_until` dates so Stage 4 can flag whether an agent quoted promo pricing in or out of window.
+
+---
+
+## Build strategy: vertical slice, then deepen
+
+```
+M0  Scaffolding        (1 day)   →  repo compiles, tests run, CLI prints help
+M1  Vertical slice     (1 day)   →  --chat-limit 5 produces a full (hollow) report.md for <$0.50
+M2  Deepening passes   (5 days)  →  each stage upgraded from stub to real; slice is regression oracle
+M3  Full-run + report  (1 day)   →  --chat-limit 0 on 387 chats, human review, script v2 draft
+```
+
+Every M2 deepening task must keep the M1 slice passing. "`scripts/run_pipeline.py --chat-limit 5` exits 0 and regenerates `output/report.md`" is the standing green-bar.
+
+---
+
+## File layout (confirmed)
+
+```
+/home/martin/whatsapp-commercial-analyzer/
+├── msgstore.db                      # input (exists, 26 MB)
+├── script-comercial.md              # input (exists, 20 KB)
+├── PLAN.md                          # spec (exists)
+├── pyproject.toml                   # NEW — managed with uv
+├── uv.lock
+├── .env                             # NEW, gitignored; ANTHROPIC_API_KEY=...
+├── .gitignore                       # NEW; ignores .env, data/, output/, __pycache__
+├── scripts/
+│   ├── run_pipeline.py              # orchestrator
+│   ├── verify_stage1.py             # smoke scripts per stage (executable)
+│   ├── verify_stage2.py
+│   ├── ...
+│   └── label_ground_truth.py        # helper: user labels 10 sample chats
+├── src/
+│   ├── __init__.py
+│   ├── context.py                   # shared Context dataclass
+│   ├── llm.py                       # Anthropic client + retry + budget + token accounting
+│   ├── schemas.py                   # Pydantic models for every JSON artifact
+│   ├── load_1.py                      # Stage 1
+│   ├── dedupe_2.py                    # Stage 2
+│   ├── script_index_3.py              # Stage 3
+│   ├── label_4.py                     # Stage 4
+│   ├── sentiment_5.py                 # Stage 5
+│   ├── conversion_6.py                # Stage 6
+│   ├── cluster_7.py                   # Stage 7
+│   └── report_8.py                    # Stage 8
+├── prompts/                         # all LLM prompts as .md files (versioned)
+│   ├── stage3_expand_script.md
+│   ├── stage4_spa_template.md
+│   ├── stage4_customer_batch.md
+│   ├── stage5_sentiment.md
+│   ├── stage6_conversion.md
+│   └── stage8_report.md
+├── data/                            # intermediate artifacts (gitignored)
+│   └── ground_truth_outcomes.csv    # user-provided: chat_id,outcome,notes
+├── output/                          # final deliverables (gitignored)
+└── tests/
+    ├── conftest.py                  # fixtures: tiny_db, sample_conversations
+    ├── fixtures/
+    │   ├── tiny.db                  # 3-chat SQLite built by tools/build_tiny_db.py
+    │   └── sample_conversations.jsonl
+    ├── test_load.py
+    ├── test_dedupe.py
+    ├── test_script_index.py
+    ├── test_cluster.py
+    ├── test_llm.py
+    └── test_pipeline.py             # orchestrator sentinels, --force, budget abort
+```
+
+Pytest-less LLM stages (4, 5, 6, 8) are verified by `scripts/verify_stageN.py` that runs the stage on `tests/fixtures/sample_conversations.jsonl` against the real API (≤5 calls, <$0.10) and asserts on output files.
+
+---
+
+## Shared schemas (`src/schemas.py`)
+
+Every artifact has a Pydantic model. Defining them once unblocks parallel work on consumer stages. **Build this FIRST** (task `M0-T3`).
+
+```python
+class Message(BaseModel):
+    msg_id: int
+    ts_ms: int
+    from_me: bool
+    text: str              # cleaned
+    text_raw: str          # original, for citations
+
+class Conversation(BaseModel):
+    chat_id: int
+    phone: str             # bare number, e.g. "5511962719203"
+    messages: list[Message]
+
+class SpaTemplate(BaseModel):
+    template_id: int
+    canonical_text: str
+    instance_count: int
+    example_msg_ids: list[int]
+    first_seen_ts: int
+    last_seen_ts: int
+
+class ScriptStep(BaseModel):
+    id: str                # "1", "2", "3", "3.5", "5", "6", "7"
+    name: str
+    canonical_texts: list[str]
+    expected_customer_intents: list[str]
+    transitions_to: list[str]
+
+class ObjectionType(BaseModel):
+    id: Literal["price","location","time_slot","competitor",
+                "hesitation_vou_pensar","delegated_talk_to_someone",
+                "delayed_response_te_falo","trust_boundary_male","other"]
+    name_pt: str
+    triggers: list[str]
+
+class LabeledMessage(BaseModel):
+    msg_id: int
+    chat_id: int
+    from_me: bool
+    step_id: str | None
+    step_context: Literal["on_script","off_script","transition","unknown"]
+    intent: str | None                    # customer only
+    objection_type: str | None            # customer only, nullable
+    sentiment: Literal["pos","neu","neg"] | None  # customer only
+    matches_script: bool | None           # spa only
+    deviation_note: str | None            # spa only
+
+class TemplateSentiment(BaseModel):
+    template_id: int
+    warmth: int           # 1..5
+    clarity: int          # 1..5
+    script_adherence: int # 1..5
+    polarity: Literal["pos","neu","neg"]
+    critique: str         # PT-BR
+
+class ConversationConversion(BaseModel):
+    chat_id: int
+    phone: str
+    conversion_score: int                 # 0..3
+    conversion_evidence: str
+    first_objection_idx: int | None
+    first_objection_type: str | None
+    resolution_idx: int | None
+    winning_reply_excerpt: str | None
+    final_outcome: Literal["booked","lost","ambiguous"]
+
+class Turnaround(BaseModel):
+    chat_id: int
+    phone: str
+    date: str                             # YYYY-MM-DD of first_objection
+    objection_type: str
+    customer_message: str
+    winning_reply: str
+    confirmation: str
+    paired_lost_deals: list[int]          # up to 2 chat_ids
+```
+
+---
+
+## Milestone M0 — Scaffolding
+
+### M0-T1 · Bootstrap project (uv, pyproject, gitignore, .env)
+**Files:** `pyproject.toml`, `uv.lock`, `.gitignore`, `.env.example`, `README.md` (minimal)
+**Effort:** 1–2h
+**What to build:**
+- `uv init --python 3.11` and add deps: `anthropic>=0.40`, `rapidfuzz`, `pyyaml`, `pydantic>=2`, `python-dotenv`, `sentence-transformers`, `hdbscan`, `pandas`, `tqdm`; dev: `pytest`, `pytest-cov`, `ruff`.
+- `.gitignore` includes: `.env`, `data/`, `output/`, `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.venv/`, `*.db-journal`.
+- `.env.example` with `ANTHROPIC_API_KEY=`.
+- Top-level `README.md` with `uv sync && uv run pytest -q && uv run python -m scripts.run_pipeline --chat-limit 5` quickstart.
+
+**Verification:**
+```bash
+uv sync && uv run python -c "import anthropic, rapidfuzz, hdbscan, sentence_transformers; print('ok')"
+```
+
+### M0-T2 · `src/llm.py` — Claude client, retry, budget, token accounting
+**Files:** `src/llm.py`, `tests/test_llm.py`
+**Effort:** 3–4h
+**What to build:**
+- Singleton `ClaudeClient` wrapping `anthropic.Anthropic()`. Reads `ANTHROPIC_API_KEY` via `python-dotenv`.
+- `complete(model: str, messages: list[dict], system: str | None, max_tokens: int, response_format: type[BaseModel] | None) -> BaseModel | str` with:
+  - Retry on `RateLimitError`, `APIConnectionError`, `APITimeoutError` — exponential backoff, 5 attempts max.
+  - Token accounting: accumulates `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` per call in a module-level `Accumulator`.
+  - Cost estimation: hardcoded price table for `claude-haiku-4-5-20251001` and `claude-sonnet-4-6`; raises `BudgetExceeded` if running total + projected-call cost > `budget_usd` (budget pulled from env var `LLM_BUDGET_USD`, default $10).
+  - If `response_format` is a Pydantic model, uses structured-output tool-use pattern: describe the schema as an Anthropic `tool`, force `tool_choice`, parse the tool-call result into the model. Raises `SchemaError` on parse failure after retries.
+- Expose `get_usage_report() -> dict` and `reset_usage()`.
+
+**Tests (`tests/test_llm.py`, pytest with respx/httpx mocks or `monkeypatch`):**
+- `test_retry_on_rate_limit` — mock 429, 429, 200 → third succeeds, 2 retries logged.
+- `test_token_accounting` — 3 canned responses with known token counts → total matches sum.
+- `test_budget_abort` — `budget_usd=0.001`, attempt 5k-token call → raises `BudgetExceeded` before hitting API.
+- `test_structured_output_schema` — `response_format=Foo` with a malformed tool response → raises `SchemaError` after retries.
+
+**Acceptance:** `uv run pytest tests/test_llm.py -q` green; `test_llm.py` runs offline (no API calls).
+
+### M0-T3 · `src/schemas.py` + `src/context.py`
+**Files:** `src/schemas.py`, `src/context.py`
+**Effort:** 2h
+**What to build:**
+- All Pydantic models from the "Shared schemas" section above.
+- `Context` dataclass: `db_path: Path`, `script_path: Path`, `data_dir: Path`, `output_dir: Path`, `prompts_dir: Path`, `chat_limit: int | None`, `budget_usd: float`, `force: bool`, `dry_run: bool`, `client: ClaudeClient`. A `Context.from_args(argv)` classmethod for the orchestrator.
+
+**Verification:**
+```bash
+uv run python -c "from src.schemas import Conversation, LabeledMessage, Turnaround; print([m.model_json_schema() for m in (Conversation, LabeledMessage, Turnaround)])"
+```
+Should print three JSON schemas without error.
+
+---
+
+## Milestone M1 — Vertical slice (thin E2E, all stubs)
+
+Goal: `uv run python -m scripts.run_pipeline --chat-limit 5 --budget-usd 1.00` completes end-to-end in ≤5 minutes, costs <$0.50, and writes a valid (mostly empty) `output/report.md` with all 7 sections present.
+
+### M1-T1 · Orchestrator skeleton — `scripts/run_pipeline.py`
+**Files:** `scripts/run_pipeline.py`, `tests/test_pipeline.py`
+**Effort:** 3h
+**What to build:**
+- CLI: `--stage N`, `--from N --to M`, `--chat-limit N`, `--budget-usd X`, `--force`, `--dry-run`.
+- Builds `Context`, imports `src.{load,dedupe,script_index,label,sentiment,conversion,cluster,report}` — each exposes `run(ctx: Context) -> StageResult` where `StageResult = {stage: int, outputs: list[Path], llm_usd: float, elapsed_s: float}`.
+- Resume logic: checks `data/stageN.done` sentinels unless `--force`. Sentinel content: `{"ts": ..., "git_sha": ..., "module_version": "..."}`.
+- Fails loudly if a stage's prerequisite file (previous stage's output) is missing: `"Stage N requires data/conversations.jsonl from Stage 1. Run: python -m scripts.run_pipeline --stage 1"`.
+- After each stage, prints `[stage N] elapsed=12.3s cost=$0.04 total=$0.21 budget=$1.00`.
+- Final summary: stages run, total time, total cost, list of output files.
+
+**Tests (pytest):**
+- `test_stage_sentinels_written` — run stage 1 on tiny_db → `data/stage1.done` exists with valid JSON.
+- `test_skip_completed_stages` — sentinel present → stage `run` mock not called.
+- `test_force_flag_reruns` — `--force` calls mock despite sentinel.
+- `test_missing_prior_output_fails_loudly` — `--stage 2` without stage 1 output → `SystemExit` with error mentioning "Stage 1".
+- `test_chat_limit_propagates` — mock stage 1 captures `ctx.chat_limit=5`.
+- `test_budget_abort_stops_pipeline` — mock stage 2 raises `BudgetExceeded` → stage 3 mock not called.
+
+**Acceptance:** `uv run python -m scripts.run_pipeline --help` prints usage. Tests green.
+
+### M1-T2 · Stage 1 stub → real (DB → conversations.jsonl)
+**Files:** `src/load.py`, `scripts/verify_stage1.py`, `tests/test_load.py`, `tools/build_tiny_db.py`
+**Effort:** 4h
+**What to build:**
+- `run(ctx)`:
+  1. Connect to `ctx.db_path` (read-only).
+  2. SQL: `SELECT m.*, c.jid_row_id, j.user, j.raw_string FROM message m JOIN chat c ON m.chat_row_id=c._id JOIN jid j ON c.jid_row_id=j._id WHERE m.message_type=0 AND m.text_data IS NOT NULL ORDER BY c._id, m.timestamp`.
+  3. Group by `chat_row_id`; for each group, produce `Conversation` with cleaned text (strip URLs via `re.sub(r"https?://\S+", "", t)`, collapse whitespace, preserve `text_raw`).
+  4. Split: ≥20 messages → `data/conversations.jsonl`; <20 → `data/conversations_short.jsonl`.
+  5. If `ctx.chat_limit` set, truncate the long list to first N (by chat_id asc, for determinism).
+- `tools/build_tiny_db.py` creates `tests/fixtures/tiny.db` with exact `msgstore.db` schema (run `sqlite3 msgstore.db ".schema message chat jid"` during build to verify schema parity) and inserts 3 chats: one 25-msg converting chat, one 22-msg lost chat, one 5-msg stub to test threshold.
+
+**Pytest (`tests/test_load.py`, offline):**
+- `test_load_filters_message_type_0` — inject type 0/1/7 → only type 0 emerges.
+- `test_load_drops_null_text` — `text_data IS NULL` excluded.
+- `test_load_orders_by_timestamp` — per chat, `ts_ms` monotonic.
+- `test_load_threshold_min_messages` — parametrize 19/20 boundary; 19-msg chat in short file.
+- `test_load_strips_urls_and_whitespace` — `"hi https://x.com\n\n hi"` → `"hi  hi"` (or single-space). `text_raw` preserves original.
+- `test_load_extracts_phone` — `jid.user="5511962719203"` → `Conversation.phone="5511962719203"`.
+- `test_chat_limit` — 3 chats, `chat_limit=2` → jsonl has 2 entries.
+
+**Smoke (`scripts/verify_stage1.py`):**
+- Runs `load.run(ctx)` against the real `msgstore.db` with no chat_limit.
+- Asserts: `~387 ± 10` long conversations, all have phones starting `55`, all messages chronological.
+- Prints the top 5 busiest chats by message count for eyeball check.
+
+**Acceptance:**
+```bash
+uv run pytest tests/test_load.py -q                          # green
+uv run python scripts/verify_stage1.py                       # prints "387 chats, N messages, OK"
+uv run python -m scripts.run_pipeline --stage 1 --chat-limit 5  # writes data/conversations.jsonl with 5 entries
+```
+
+### M1-T3 · Stage 2 stub → real (dedupe spa messages)
+**Files:** `src/dedupe.py`, `scripts/verify_stage2.py`, `tests/test_dedupe.py`
+**Effort:** 3h
+**What to build:**
+- `run(ctx)`: read `data/conversations.jsonl`, extract all `from_me=True` messages, accent-normalize via `unicodedata.normalize('NFKD', t).encode('ascii','ignore').decode().lower()`, cluster with `rapidfuzz.process.cdist` token-set ratio at threshold 88 (union-find merge).
+- Output `data/spa_templates.json` matching `list[SpaTemplate]`.
+- Pick canonical text = instance with longest original text in cluster.
+
+**Pytest (offline):**
+- `test_exact_duplicates_collapse` — two identical → one template, count=2.
+- `test_fuzzy_near_duplicates_collapse` — "Olá bom dia 😊" + "Ola, bom dia!" → one template.
+- `test_different_messages_stay_separate` — greeting vs price → 2 templates.
+- `test_threshold_boundary` — parametrize scores 87/89 around 88.
+- `test_template_metadata` — `first_seen_ts ≤ last_seen_ts`, `example_msg_ids` non-empty and unique.
+- `test_only_from_me_1` — customer messages never templated.
+
+**Smoke (`scripts/verify_stage2.py`):**
+- Runs against full Stage 1 output.
+- Asserts: 300 ≤ template count ≤ 600 (sanity window).
+- Prints top 20 templates by `instance_count`; human-reviewable.
+- Asserts top 20 contains at least one message with "bom dia" AND one with "R$" (obvious-class check).
+
+**Acceptance:**
+```bash
+uv run pytest tests/test_dedupe.py -q
+uv run python scripts/verify_stage2.py   # prints top 20 templates, all counts make sense
+```
+
+### M1-T4 · Stage 3 stub (hand-curated script.yaml, no LLM yet)
+**Files:** `src/script_index.py` (stub mode), `data/script.yaml` (committed — it's curated content)
+**Effort:** 3h
+**What to build (stub for M1):**
+- `run(ctx)`: if `data/script.yaml` exists and `ctx.force=False`, no-op (return existing). This lets M1 work without LLM cost.
+- Commit a hand-written `data/script.yaml` covering:
+  - 7 steps (ids `1, 2, 3, 3.5, 5, 6, 7`) with `name`, `canonical_texts` (copy-pasted from script-comercial.md), `expected_customer_intents` (3–5 per step guessed by developer).
+  - `services`: Massagem Relaxante / Drenagem / Miofascial / Desportiva / Redutora / Facial / Shiatsu / Mini-day-spa / Day-spa with prices from the script.
+  - `price_grid`: flattened from the Preços table (rows: service, persons, price, payment_rules).
+  - `additionals`: 8 add-ons with prices.
+  - `negotiation_rules`: 3 rules encoded as policy flags (`no_unsolicited_discount`, `mon_wed_5pct_dayspa`, `no_price_before_interest`).
+  - `objection_taxonomy`: 9 canonical types (see `ObjectionType` schema) with PT-BR trigger words.
+  - `promocoes`: dia-das-maes block with `valid_from: 2026-04-16`, `valid_until: 2026-05-17`, usage deadline `2026-06-30`.
+  - Empty `inferred_extensions:` (filled by M2 LLM expansion).
+
+**Pytest (offline, script parsing only — actual LLM expansion is M2):**
+- `test_script_yaml_loads` — loads, validates against Pydantic.
+- `test_parse_script_extracts_7_steps` — all step ids present.
+- `test_objection_taxonomy_preseeded` — 9 types.
+- `test_promocoes_dates_parsed` — `valid_from` is a `date` not a string.
+
+**Acceptance:**
+```bash
+uv run pytest tests/test_script_index.py -q
+```
+
+### M1-T5 · Stages 4–7 stubs (pass-through)
+**Files:** `src/label.py`, `src/sentiment.py`, `src/conversion.py`, `src/cluster.py`
+**Effort:** 2h total
+**What to build:**
+- **`label.py` stub:** reads `conversations.jsonl`; for every message emit `LabeledMessage(step_id=None, step_context="unknown", intent=None, objection_type=None, sentiment=None)`. Writes `data/labeled_messages.jsonl`. Zero LLM calls.
+- **`sentiment.py` stub:** reads `spa_templates.json`; emit `TemplateSentiment(warmth=3, clarity=3, script_adherence=3, polarity="neu", critique="(não avaliado)")` for each. Writes `data/template_sentiment.json`.
+- **`conversion.py` stub:** reads `conversations.jsonl`; for each emit `ConversationConversion(conversion_score=0, final_outcome="ambiguous", first_objection_idx=None, ...)`. Writes `data/conversions.jsonl`, empty `data/turnarounds.json=[]`, `data/lost_deals.json=[]`.
+- **`cluster.py` stub:** reads labeled messages; writes empty `data/aggregations.json={"per_step":{}, "off_script_clusters":[]}`.
+
+**Acceptance:** pipeline runs through stages 1–7 with `--chat-limit 5` in <10s, zero LLM cost.
+
+### M1-T6 · Stage 8 minimal — Sonnet writes a hollow report
+**Files:** `src/report.py`, `prompts/stage8_report.md`, `scripts/verify_stage8.py`
+**Effort:** 3h
+**What to build:**
+- `run(ctx)`: load all aggregates. Pass to Sonnet 4.6 with a prompt that instructs: "Produce a PT-BR Markdown report with exactly these 7 sections even if some are empty; show '(sem dados)' where appropriate". Stage 8 always runs (no stub). On M1 with empty inputs, report will be skeletal but well-structured.
+- Also emit empty/near-empty CSVs: `turnarounds.csv`, `lost_deals.csv`, `per_step.csv`, `spa_templates_scored.csv`, `off_script_clusters.csv`.
+
+**Smoke (`scripts/verify_stage8.py`):**
+- Runs Stage 8 on the M1 hollow inputs.
+- Asserts: `output/report.md` contains each of the 7 section headers from `PLAN.md` §Stage 8.
+- Asserts: CSV headers present, UTF-8 BOM optional but accented chars round-trip.
+- Cost assertion: single Sonnet call <$0.30.
+
+**Acceptance (M1 complete):**
+```bash
+uv run python -m scripts.run_pipeline --chat-limit 5 --budget-usd 1.00
+# Runs all 8 stages in <5 min, costs <$0.50, produces output/report.md with all 7 sections.
+open output/report.md   # stakeholder can read the skeleton
+```
+
+---
+
+## Milestone M2 — Deepening passes
+
+Each M2 task replaces a stubbed stage with the real implementation. After each task, M1 acceptance must still pass.
+
+### Stage 3 deepening
+
+#### M2-S3-T1 · LLM script expansion (Sonnet, 1 call)
+**Files:** `src/script_index.py`, `prompts/stage3_expand_script.md`
+**Effort:** 4h
+**What to build:**
+- Augment `script_index.run(ctx)`: if `script.yaml.inferred_extensions` is empty or `ctx.force`, call Sonnet with the full `script-comercial.md` + current YAML, asking for:
+  - A tightened Day-Spa pitch flow (re-structures what's already there).
+  - Standardized reply templates for each of the 9 objection types.
+  - Flag internal inconsistencies (e.g., Massagem Especial price "R$285 por R$255" in promoções vs base R$200 — flag or explain).
+- Merge the LLM output into `script.yaml` under `inferred_extensions:`. The hand-curated top-level YAML is **not** modified.
+- Budget guard: hard cap 8k output tokens.
+
+**Smoke (`scripts/verify_stage3.py`, real API):**
+- Runs the expansion.
+- Asserts: `inferred_extensions.day_spa_pitch.steps` has ≥3 items and mentions "escalda-pés" or "banho de imersão".
+- Asserts: `inferred_extensions.objection_replies` has entries for all 9 taxonomy ids.
+- Asserts: cost <$0.60.
+
+**Pytest (offline, with `fake_llm` for the `complete()` call):**
+- `test_expansion_merges_into_yaml` — mock returns canned JSON → loaded YAML has expected keys under `inferred_extensions`.
+- `test_expansion_skipped_when_populated` — pre-filled yaml → `complete()` not called.
+
+### Stage 4 deepening
+
+#### M2-S4-T1 · Spa-template step labeling (Haiku, once per template)
+**Files:** `src/label.py`, `prompts/stage4_spa_template.md`
+**Effort:** 4h
+**What to build:**
+- For each `SpaTemplate`, call Haiku with the canonical text + the script steps summary → returns `{step_id, matches_script, deviation_note}`. Propagate to every instance of that template via `template_id` lookup (Stage 2 mapping).
+- Write `data/spa_template_labels.json` (indexed by template_id) as an intermediate; `label.py` consumer joins it onto messages.
+- ~500 templates × ~500 tokens in × ~100 tokens out ≈ $1.00.
+
+**Pytest (offline, with `fake_llm`):**
+- `test_spa_template_labeled_once` — 2 instances of same template → 1 `complete()` call, both labels identical.
+- `test_label_schema_validated` — malformed response → retry via `llm.py` structured-output path.
+
+**Smoke:** part of `scripts/verify_stage4.py` (shared with customer batching task).
+
+#### M2-S4-T2 · Customer message batching & tagging (Haiku, batches of 30)
+**Files:** `src/label.py`, `prompts/stage4_customer_batch.md`
+**Effort:** 4h
+**What to build:**
+- Customer messages batched 30 at a time. Prompt includes: last 3 spa messages as `step_context_hint`, script step summaries, the 9 objection triggers.
+- Returns per-message `{msg_id, step_context, intent, objection_type|null, sentiment}`.
+- ~15k customer messages / 30 = 500 calls × ~1000 tokens in × ~500 tokens out ≈ $1.50.
+
+**Pytest (offline):**
+- `test_customer_batching_respects_size` — 65 msgs → 3 calls (30, 30, 5).
+- `test_off_script_flagged` — fake_llm returns `step_context=off_script` for a message like "tem estacionamento?" → persists.
+- `test_objection_type_recognized` — parametrize: "achei caro"→price, "muito longe"→location, "vou pensar"→hesitation_vou_pensar. Uses real Haiku on a batch of 9 (one per type) — actually this is the integration test below.
+
+**Smoke (`scripts/verify_stage4.py`, real API, small):**
+- Runs Stage 4 on `--chat-limit 5` output (~500 spa msgs, ~500 customer msgs). Cost ≤$0.15.
+- Asserts: every `LabeledMessage` validates. ≥80% of spa messages have a non-null `step_id`. ≥50% of customer messages have a non-null `intent`. At least one message of each of the 3 most-common objection types (`price`, `hesitation_vou_pensar`, `time_slot`) appears.
+- Prints 10 random labeled messages for manual eyeballing.
+
+### Stage 5 deepening
+
+#### M2-S5-T1 · Template sentiment scoring
+**Files:** `src/sentiment.py`, `prompts/stage5_sentiment.md`
+**Effort:** 3h
+**What to build:**
+- For each `SpaTemplate`, one Haiku call → `TemplateSentiment`. Batch 10 templates per call to cut overhead (50 calls × ~2000 tokens ≈ $0.40).
+- Rubric in PT-BR system prompt, with few-shot: a known-warm ("fico muito feliz em te receber 💛"), a known-cold ("segue valor: R$420"), a known-critical ("você não pode levar isso").
+
+**Pytest (offline, `fake_llm`):**
+- `test_scores_in_range` — every template: warmth, clarity, script_adherence ∈ [1,5]; polarity ∈ {pos,neu,neg}.
+- `test_propagation_by_template_id` — no-op (propagation is a DB join at report time, not in sentiment module).
+- `test_critique_is_portuguese` — fake response includes "ç" / "ã" / common PT words → saved as-is.
+
+**Smoke (`scripts/verify_stage5.py`, real API):**
+- Picks top 6 templates by instance_count from full corpus (or Stage 1 chat_limit=5 output), scores them.
+- Human-readable print; asserts rubric fields present and polarity distributed (not all "neu").
+- Cost <$0.05.
+
+### Stage 6 deepening — THE HIGH-VALUE STAGE
+
+#### M2-S6-T1 · Conversation truncation utility
+**Files:** `src/conversion.py` (function `truncate_for_llm`)
+**Effort:** 2h
+**What to build:**
+- Pure function: given a conversation and its labeled objection indices, produce a ≤3000-token string containing: first 15 msgs + ±10 around each `objection_idx` + last 15 msgs. De-dup overlapping windows. Mark elisions with `[... N mensagens ...]`.
+
+**Pytest (offline):**
+- `test_truncation_of_long_chat` — 200-msg chat with objection at idx=80 → output tokens ≤3k via `tiktoken` proxy count. Must include msg 0–14, 70–90, 185–199.
+- `test_truncation_short_chat_passthrough` — 30-msg chat → returned verbatim.
+- `test_truncation_no_objections` — only first+last windows included.
+
+#### M2-S6-T2 · Conversion detection (Haiku, 1 call per chat)
+**Files:** `src/conversion.py`, `prompts/stage6_conversion.md`
+**Effort:** 5h
+**What to build:**
+- For each of ~387 chats: truncate, send to Haiku with structured-output schema for `ConversationConversion`. Prompt explicitly enumerates the 9 objection types and includes 2 positive + 2 negative few-shot examples from the user's ground-truth set (hand-picked chats M3-T1).
+- Cost: 387 × ~2500 in × ~300 out ≈ $1.80.
+- Write `data/conversions.jsonl`.
+
+**Pytest (offline, `fake_llm`):**
+- `test_conversion_score_parsed` — fake response with `conversion_score=3` → structure ok.
+- `test_all_objection_types_covered` — parametrize 9 synthetic chats (one per type), fake_llm classifies each correctly → structure ok.
+- `test_phone_number_attached` — `jid.user` propagated into `ConversationConversion.phone`.
+
+**Smoke (`scripts/verify_stage6.py`, real API, small):**
+- Runs on 10 ground-truth chats only.
+- Asserts: ≥8/10 match the user's `outcome` label in `data/ground_truth_outcomes.csv` (booked vs lost). If fewer: exits non-zero with a prompt-tuning suggestion.
+- Cost <$0.10.
+
+#### M2-S6-T3 · Turnaround & lost-deal extraction (pure logic, no LLM)
+**Files:** `src/conversion.py` (function `extract_turnarounds`), `tests/test_conversion.py`
+**Effort:** 3h
+**What to build:**
+- `extract_turnarounds(conversions, conversations) -> tuple[list[Turnaround], list[LostDeal]]`:
+  - **Turnaround:** `first_objection_type != null` AND `conversion_score ≥ 2` AND `resolution_idx > first_objection_idx` AND `final_outcome="booked"`.
+  - **Lost deal:** `first_objection_type != null` AND `conversion_score ≤ 1` AND `final_outcome="lost"`.
+  - Pair each turnaround with 1–2 lost deals of same objection type (prefer earliest-dated lost deals for diversity).
+  - Populate `Turnaround.customer_message` from the message at `first_objection_idx`, `winning_reply` from the spa message at `resolution_idx`, `confirmation` from the first `from_me=False` message after `resolution_idx` containing booking-positive phrases (or empty if none).
+
+**Pytest (offline):**
+- `test_turnaround_detected` — synthetic conversion meeting all 4 conditions → in list.
+- `test_no_turnaround_when_no_objection` — null first_objection → excluded.
+- `test_lost_deal_detected` — score 0 + objection → in lost list.
+- `test_lost_deal_pairing` — 5 turnarounds of type=price + 3 lost deals of type=price → each turnaround gets 1–2 paired.
+- `test_phone_number_attached` — each Turnaround has `jid.user`.
+
+**Acceptance:**
+```bash
+uv run pytest tests/test_conversion.py -q   # all green, offline
+uv run python scripts/verify_stage6.py      # ≥8/10 ground-truth matches
+```
+
+### Stage 7 deepening
+
+#### M2-S7-T1 · Off-script embedding + HDBSCAN
+**Files:** `src/cluster.py`, `tests/test_cluster.py`
+**Effort:** 4h
+**What to build:**
+- Load `labeled_messages.jsonl`. Filter `from_me=False AND step_context="off_script"`.
+- Group by `step_id` (parent step context). Within each group:
+  - Embed with `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (loaded once, cached). CPU is fine.
+  - HDBSCAN `min_cluster_size=3, metric='cosine'`.
+  - Medoid = message with min sum of cosine distances to cluster members.
+- Aggregations: per step → `{on_script_count, off_script_count, top_intents: [...], top_clusters: [{medoid_text, size, example_msg_ids}], top_objections: [...]}`.
+- Write `data/aggregations.json`.
+
+**Pytest (offline, no API):**
+- `test_embeddings_deterministic` — fixed seed, 2 runs → identical vectors within 1e-6.
+- `test_clustering_groups_paraphrases` — ["quanto custa?", "qual o valor?", "qual preço?", "onde fica?", "qual endereço?", "fica aonde?"] → 2 clusters of 3.
+- `test_medoid_selection` — synthetic 5-point cluster → medoid is the geometrically central member.
+- `test_empty_input_handled` — empty filter → `aggregations.json={"per_step":{},"off_script_clusters":[]}`, no crash.
+- `test_aggregation_counts_match_inputs` — sum(cluster sizes) + noise_count == total off-script input.
+
+**Smoke:** subsumed by M1 slice (Stage 7 always runs on real data after M2-S4 is in).
+
+### Stage 8 deepening
+
+#### M2-S8-T1 · Full report generation with real data
+**Files:** `src/report.py`, `prompts/stage8_report.md`, `tests/test_report.py`
+**Effort:** 5h
+**What to build:**
+- Input packet to Sonnet:
+  - Per-step aggregates (Stage 7).
+  - Top 10 positive + top 10 negative templates (by polarity × instance_count × warmth).
+  - Top 20 turnarounds (ranked by conversion_score × clarity-of-winning-reply — needs a simple scoring function; length of winning_reply ≤200 chars is a good proxy).
+  - Paired lost deals.
+  - Script inferred_extensions (for §7 "Lacunas no script").
+- Prompt structure: system sets style (PT-BR, direct, no filler); user message provides the structured JSON blobs with schemas inline.
+- Total context: ≤40k tokens in, ≤6k out → Sonnet call ~$1.50.
+- Post-processing: write the 5 CSVs directly from Python (not the LLM). `turnarounds.csv` columns: `telefone, data, tipo_objecao, mensagem_cliente, resposta_vencedora, confirmacao`. Use `pandas.to_csv(encoding="utf-8", index=False)`.
+
+**Pytest (offline, `fake_llm`):**
+- `test_report_sections_present` — all 7 PT-BR headers in output.
+- `test_turnarounds_csv_schema` — exact column names.
+- `test_top20_cap` — 50 inputs → 20 rows in the report §5.
+- `test_phone_numbers_in_md` — report body contains ≥1 `/55\d{10,11}/` phone.
+- `test_csv_utf8_roundtrip` — read back, "ção", "é", "ô" survive.
+
+**Smoke (`scripts/verify_stage8.py` — upgraded from M1-T6):**
+- Runs on full-pipeline output with real Sonnet.
+- Asserts all 7 sections non-empty (each has at least 100 chars of body text).
+- Manual eyeball: open `output/report.md` — does it read like a human wrote it?
+
+---
+
+## Milestone M3 — Full run, calibration, human review
+
+### M3-T1 · Ground-truth collection helper
+**Files:** `scripts/label_ground_truth.py`, `data/ground_truth_outcomes.csv`
+**Effort:** 2h
+**What to build:**
+- Interactive CLI: loads `data/conversations.jsonl`, picks 10 chats stratified by length (3 short, 4 medium, 3 long). Prints each chat formatted, prompts user: `[b]ooked / [l]ost / [a]mbiguous / [s]kip / notes:`.
+- Writes `data/ground_truth_outcomes.csv`: `chat_id, phone, outcome, notes`.
+- **User action required before M2-S6 finishes:** user runs this script, labels 10 chats. Without it, Stage 6 smoke test can't run.
+
+**Acceptance:** User hands over CSV with 10 rows.
+
+### M3-T2 · Prompt-tuning loop for Stage 6
+**Files:** `prompts/stage6_conversion.md` (iterated), observations in `data/calibration_log.md`
+**Effort:** 2–4h
+**What to do:**
+- Run `scripts/verify_stage6.py` against the 10 ground-truth chats.
+- If ≥8/10 match: ship.
+- If <8/10: inspect mismatches in `data/conversions.jsonl`, adjust prompt (clarify "ambiguous", add negative example for the missed class), re-run. Cap: 3 iterations; if still <8 after 3, escalate to Sonnet for Stage 6 at ~5× cost.
+
+**Verification:** final iteration ≥8/10, notes in `data/calibration_log.md`.
+
+### M3-T3 · Full-corpus run
+**Effort:** 1h (mostly wall clock)
+**What to do:**
+```bash
+uv run python -m scripts.run_pipeline --budget-usd 10.00 --force
+```
+- Monitor cost print-outs per stage.
+- Hard abort criterion: if Stage 4 exceeds $4 (double estimate), stop and investigate.
+- Total wall time: expect 30–60 min (Stage 4 customer batching + Stage 6 per-chat calls dominate).
+
+**Verification:**
+- `wc -l data/conversations.jsonl` ≈ 387.
+- `jq length data/turnarounds.json` ≥ 20 (ideally 30–60).
+- `output/report.md` exists and is ≥30 KB.
+
+### M3-T4 · Human review + script v2 draft
+**Files:** `output/script_v2_proposal.md` (new Sonnet output)
+**Effort:** 3h (mostly reading)
+**What to do:**
+- Read top 5 turnarounds manually; cross-check against `winning_reply` in raw messages. Flag false positives in `data/review_notes.md`.
+- If >1 false positive in top 5: iterate on `extract_turnarounds` scoring (M2-S6-T3) and re-rank; no re-LLMing needed.
+- One-off Sonnet call: input = `script-comercial.md` + `output/report.md` §7 "Lacunas" + §5 top turnaround arguments → output = `output/script_v2_proposal.md` with concrete paste-ready additions to the script (one standardized response per objection type, plus a cleaner Day-Spa pitch).
+
+**Business acceptance:**
+- Stakeholder reads `output/report.md` and `output/script_v2_proposal.md`.
+- Stakeholder identifies ≥3 insights they didn't already know.
+- Stakeholder can point to ≥1 standardized response they will adopt into the next version of the script.
+- The 5 sampled turnarounds include real phone numbers matching known bookings (user verifies against booking records).
+
+---
+
+## Cross-cutting concerns
+
+### Test running
+
+```bash
+# Fast feedback — runs on every save, no API
+uv run pytest -q                    # all pure-logic tests (~5s)
+
+# Per-stage smoke — runs when touching a stage, costs pennies
+uv run python scripts/verify_stage1.py   # no API
+uv run python scripts/verify_stage2.py   # no API
+uv run python scripts/verify_stage3.py   # ~$0.05
+uv run python scripts/verify_stage4.py   # ~$0.15
+uv run python scripts/verify_stage5.py   # ~$0.05
+uv run python scripts/verify_stage6.py   # ~$0.10
+uv run python scripts/verify_stage8.py   # ~$0.30
+
+# End-to-end — runs before commit on stage changes
+uv run python -m scripts.run_pipeline --chat-limit 5 --budget-usd 1.00   # ~$0.50
+
+# The real deal — runs once per milestone or after prompt changes
+uv run python -m scripts.run_pipeline --budget-usd 10.00 --force         # ~$6-8
+```
+
+### Risks & open items
+
+| Risk | Mitigation |
+|---|---|
+| Haiku mis-classifies objection types in PT-BR slang (e.g. "tô ruim de grana" for price) | M2-S6 smoke test over 10 ground-truth chats catches systematic errors before the full run. |
+| HDBSCAN returns mostly noise (cluster membership ≤20%) | `test_aggregation_counts_match_inputs` surfaces noise ratio; if high, drop `min_cluster_size` to 2 or try `UMAP + HDBSCAN`. |
+| `rapidfuzz` threshold 88 either over-merges ("bom dia" + "boa tarde") or under-merges | M1-T3 smoke prints top 20 templates; eyeball for 10 minutes before committing threshold. Parameterize as `ctx.dedupe_threshold`. |
+| Phone numbers in report raise privacy concern | Leave them plaintext in JSON/CSV (they're the primary key for business verification); the final `output/report.md` should keep them — this is an internal tool for the spa owner, not a public deliverable. If this changes, add a `--anonymize` flag that hashes all phones before Stage 8. |
+| Budget blown on Stage 4 customer batching | Orchestrator aborts before starting Stage 4 if projected cost (500 calls × measured-avg-cost-per-call from a 5-call sample) exceeds remaining budget. |
+| Script `script-comercial.md` has inconsistent Markdown (empty `#` headers, emoji-only lines) | Stage 3 parser is not regex — it passes the raw file to Sonnet and gets back structured JSON. Brittleness goes away. |
+
+### What's deliberately out of scope
+
+- Media messages (`message_type != 0`). ~5% of conversations reference voice notes or images; labeling these needs a different pipeline.
+- Multi-turn memory of a specific customer across chat_ids. Phone uniqueness gets us partway but we don't de-duplicate customers.
+- Real-time / incremental runs. Everything re-runs from `msgstore.db`; no watermark logic.
+- A web UI. `output/report.md` opened in any Markdown viewer is the UI.
+
+---
+
+## Task summary (scan this)
+
+| ID | Title | Effort | Prereqs | LLM cost |
+|---|---|---|---|---|
+| M0-T1 | Bootstrap project (uv, pyproject, gitignore, .env) | 1–2h | — | $0 |
+| M0-T2 | `src/llm.py` — client, retry, budget, accounting | 3–4h | M0-T1 | $0 |
+| M0-T3 | `src/schemas.py` + `src/context.py` | 2h | M0-T1 | $0 |
+| M1-T1 | Orchestrator skeleton `scripts/run_pipeline.py` | 3h | M0-T3 | $0 |
+| M1-T2 | Stage 1: load DB → conversations.jsonl | 4h | M1-T1 | $0 |
+| M1-T3 | Stage 2: rapidfuzz dedupe | 3h | M1-T2 | $0 |
+| M1-T4 | Stage 3: hand-curated `script.yaml` | 3h | M0-T3 | $0 |
+| M1-T5 | Stages 4–7 stubs (pass-through) | 2h | M1-T2, M1-T4 | $0 |
+| M1-T6 | Stage 8 minimal hollow report | 3h | M1-T5 | $0.30 |
+| **M1 COMPLETE** | **End-to-end on 5 chats, <$0.50** | | | |
+| M2-S3-T1 | Stage 3 LLM script expansion | 4h | M1-T4 | $0.50 |
+| M2-S4-T1 | Stage 4 spa-template labeling | 4h | M1-T3 | $1.00 |
+| M2-S4-T2 | Stage 4 customer batching & tagging | 4h | M2-S4-T1 | $1.50 |
+| M2-S5-T1 | Stage 5 template sentiment | 3h | M1-T3 | $0.40 |
+| M2-S6-T1 | Stage 6 truncation utility | 2h | M1-T2 | $0 |
+| M3-T1 | Ground-truth collection helper | 2h | M1-T2 | $0 |
+| M2-S6-T2 | Stage 6 conversion detection | 5h | M2-S6-T1, M3-T1 | $1.80 |
+| M2-S6-T3 | Stage 6 turnaround extraction (pure) | 3h | M2-S6-T2 | $0 |
+| M2-S7-T1 | Stage 7 embedding + HDBSCAN | 4h | M2-S4-T2 | $0 |
+| M2-S8-T1 | Stage 8 full report | 5h | M2-S7-T1, M2-S6-T3, M2-S5-T1 | $1.50 |
+| M3-T2 | Prompt-tuning loop for Stage 6 | 2–4h | M2-S6-T2 | $0.50 |
+| M3-T3 | Full-corpus run | 1h | all M2 | $6–8 |
+| M3-T4 | Human review + script v2 draft | 3h | M3-T3 | $0.30 |
+
+**Total effort:** ~70–85 dev-hours (~2 working weeks for one developer).
+**Total LLM spend projection:** $8–10 including calibration iterations.
+**First stakeholder-readable artifact:** end of day 1 (M1 complete).
