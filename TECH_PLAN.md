@@ -29,6 +29,29 @@ These are noted so the developer doesn't get stuck:
 
 ---
 
+## Revision v2 — design decisions (2026-04-20)
+
+Applied after review pass. Supersedes any earlier inline statement that conflicts.
+
+1. **Template → message map:** `SpaTemplate.example_msg_ids` stays (examples only). Full mapping lives in a new sidecar file `data/spa_message_template_map.json` — `{msg_id: template_id}`. Stage 2 writes it; Stage 4 reads it to propagate template labels.
+2. **Stage 6 prereq fix:** `M2-S6-T1` (truncation) and `M2-S6-T2` (conversion detection) depend on **`M2-S4-T2`** (customer batching) — objection indices come from Stage 4 labels, not from Stage 6 itself. PROGRESS + dependency table updated.
+3. **Spa-side `step_context` derived:** `LabeledMessage.step_context` for spa messages is **derived** from `matches_script`: `true → "on_script"`, `false → "off_script"`. No extra LLM field. `transition`/`unknown` reserved for customer-side ambiguity.
+4. **Stage 4 customer batching — cross-chat, 30 per call:** Batches pack 30 customer messages drawn across chats to max fill. Each message in prompt carries its own `chat_id` + `step_context_hint` (last 3 spa msgs from the same chat). Trades prompt-build complexity for fewer calls. Per-chat batching rejected (wasted slots on short chats).
+5. **FUPs are first-class steps:** `script.yaml` has **9 step entries** — `"1","2","3","3.5","5","6","7","fup1","fup2"`. Stage 4 may assign `step_id ∈ {fup1,fup2}` to spa messages resembling follow-up templates (silence bumps, "ainda com interesse?" etc.). `ScriptStep.id` already a string — no schema change.
+6. **Script file split:**
+   - `data/script.yaml` — committed, hand-curated source of truth (M1-T4).
+   - `data/script_extensions.yaml` — gitignored, LLM-generated via M2-S3-T1. Stage 3 writes **here**, not into `script.yaml`. Stages 4/8 load both and merge in memory.
+7. **Turnaround ranking (Stage 8):** `score = conversion_score × clarity`, where `clarity` comes from `TemplateSentiment.clarity` of the template containing `winning_reply_msg_id`. Requires reverse lookup via the Decision-1 sidecar map. Length-proxy heuristic dropped.
+8. **Prompt caching — tracked, not enforced:** `src/llm.py` accumulates `cache_read_input_tokens` + `cache_creation_input_tokens` and reports them in `get_usage_report()`. **No** `cache_control` breakpoints added to prompts. If budget runs tight, revisit.
+9. **Ground truth — 20 chats:** M3-T1 labels **20** (stratified: 6 short, 8 medium, 6 long). M3-T2 ship threshold = **≥16/20** match.
+10. **`final_outcome=booked` is text-inferred only:** No CRM/booking-DB cross-check. Accept text false-positives ("vou agendar sim" that never materialized). Documented limitation, not a bug.
+11. **DB schema confirmed (2026-04-20):** `message(_id, chat_row_id, from_me, message_type, text_data, timestamp, sender_jid_row_id, sort_id, key_id, ...)` · `chat(_id, jid_row_id, group_type, ...)` · `jid(_id, user, raw_string, ...)`. Counts: 34,249 total msgs; **28,113** with `message_type=0 AND text_data IS NOT NULL`; 2,013 chats; 18,495 jids. Stage 1 must assert/filter `chat.group_type=0` (no group chats in analysis).
+12. **Model IDs — aliased (undated):** Use `claude-sonnet-4-6` and `claude-haiku-4-5` everywhere. Drop the dated suffix `-20251001`. Price table in `src/llm.py` keyed on the aliased names.
+13. **Dedupe O(N²) accepted:** `rapidfuzz.process.cdist` on ~13k spa messages → 169M pairs, ~1–2 GB RAM. Feasible on dev box. No blocking step needed unless runtime >5 min.
+14. **Aggregation schema added:** New Pydantic models `PerStepAgg`, `OffScriptCluster`, `Aggregation`. See updated Shared schemas section.
+
+---
+
 ## Build strategy: vertical slice, then deepen
 
 ```
@@ -120,12 +143,15 @@ class SpaTemplate(BaseModel):
     template_id: int
     canonical_text: str
     instance_count: int
-    example_msg_ids: list[int]
+    example_msg_ids: list[int]  # examples only; full map in data/spa_message_template_map.json
     first_seen_ts: int
     last_seen_ts: int
 
+# Stage 2 also writes data/spa_message_template_map.json — {str(msg_id): template_id}.
+# Stage 4 reads it to propagate template labels to every instance.
+
 class ScriptStep(BaseModel):
-    id: str                # "1", "2", "3", "3.5", "5", "6", "7"
+    id: str                # "1","2","3","3.5","5","6","7","fup1","fup2" (9 steps incl. FUPs)
     name: str
     canonical_texts: list[str]
     expected_customer_intents: list[str]
@@ -143,6 +169,8 @@ class LabeledMessage(BaseModel):
     chat_id: int
     from_me: bool
     step_id: str | None
+    # For spa messages, step_context is DERIVED: matches_script=true -> "on_script",
+    # matches_script=false -> "off_script". "transition"/"unknown" only for customer side.
     step_context: Literal["on_script","off_script","transition","unknown"]
     intent: str | None                    # customer only
     objection_type: str | None            # customer only, nullable
@@ -176,8 +204,29 @@ class Turnaround(BaseModel):
     objection_type: str
     customer_message: str
     winning_reply: str
+    winning_reply_msg_id: int             # for template lookup (clarity score in Stage 8 ranking)
     confirmation: str
     paired_lost_deals: list[int]          # up to 2 chat_ids
+
+# Stage 7 aggregates
+
+class OffScriptCluster(BaseModel):
+    step_id: str                          # parent step (last preceding spa step before off-script msg)
+    medoid_text: str
+    size: int
+    example_msg_ids: list[int]
+
+class PerStepAgg(BaseModel):
+    step_id: str
+    on_script_count: int
+    off_script_count: int
+    top_intents: list[tuple[str, int]]    # [(intent, count), ...]
+    top_clusters: list[OffScriptCluster]
+    top_objections: list[tuple[str, int]] # [(objection_type, count), ...]
+
+class Aggregation(BaseModel):
+    per_step: dict[str, PerStepAgg]       # keyed by step_id
+    off_script_clusters: list[OffScriptCluster]  # global noise bucket (no parent step)
 ```
 
 ---
@@ -205,8 +254,8 @@ uv sync && uv run python -c "import anthropic, rapidfuzz, hdbscan, sentence_tran
 - Singleton `ClaudeClient` wrapping `anthropic.Anthropic()`. Reads `ANTHROPIC_API_KEY` via `python-dotenv`.
 - `complete(model: str, messages: list[dict], system: str | None, max_tokens: int, response_format: type[BaseModel] | None) -> BaseModel | str` with:
   - Retry on `RateLimitError`, `APIConnectionError`, `APITimeoutError` — exponential backoff, 5 attempts max.
-  - Token accounting: accumulates `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` per call in a module-level `Accumulator`.
-  - Cost estimation: hardcoded price table for `claude-haiku-4-5-20251001` and `claude-sonnet-4-6`; raises `BudgetExceeded` if running total + projected-call cost > `budget_usd` (budget pulled from env var `LLM_BUDGET_USD`, default $10).
+  - Token accounting: accumulates `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` per call in a module-level `Accumulator`. Cache tokens **tracked for reporting only** — no `cache_control` breakpoints added to prompts.
+  - Cost estimation: hardcoded price table keyed on aliased model IDs `claude-haiku-4-5` and `claude-sonnet-4-6` (no dated suffix); raises `BudgetExceeded` if running total + projected-call cost > `budget_usd` (budget pulled from env var `LLM_BUDGET_USD`, default $10).
   - If `response_format` is a Pydantic model, uses structured-output tool-use pattern: describe the schema as an Anthropic `tool`, force `tool_choice`, parse the tool-call result into the model. Raises `SchemaError` on parse failure after retries.
 - Expose `get_usage_report() -> dict` and `reset_usage()`.
 
