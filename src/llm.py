@@ -432,6 +432,8 @@ class ClaudeClient:
             )
 
         # hybrid
+        if self._max is None:
+            return self._api_call(model, messages, system, max_tokens, response_format)
         if self.max_exhausted:
             if time.time() < self.reset_ts:
                 return self._api_call(model, messages, system, max_tokens, response_format)
