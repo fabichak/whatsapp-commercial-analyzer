@@ -1,0 +1,8 @@
+2026-04-21 17:02:20,301 INFO probe: ---- A sonnet short: model=claude-sonnet-4-5 text_len=9 structured=False ----
+2026-04-21 17:02:20,303 DEBUG asyncio: Using selector: EpollSelector
+2026-04-21 17:02:20,304 INFO claude_agent_sdk._internal.transport.subprocess_cli: Using bundled Claude Code CLI: /home/martin/whatsapp-commercial-analyzer/.venv/lib/python3.11/site-packages/claude_agent_sdk/_bundled/claude
+2026-04-21 17:02:20,374 DEBUG claude_agent_sdk._internal.transport.subprocess_cli: OTEL trace context injection failed
+Traceback (most recent call last):
+  File "/home/martin/whatsapp-commercial-analyzer/.venv/lib/python3.11/site-packages/claude_agent_sdk/_internal/transport/subprocess_cli.py", line 413, in connect
+    from opentelemetry import propagate
+ModuleNotFoundError: No module named 'opentelemetry'

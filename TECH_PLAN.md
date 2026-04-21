@@ -768,6 +768,40 @@ uv run python -m scripts.run_pipeline --chat-limit 5 --budget-usd 1.00   # ~$0.5
 uv run python -m scripts.run_pipeline --budget-usd 10.00 --force         # ~$6-8
 ```
 
+### M2-OPS-T1 · Safe `CLAUDE_MAX_KILL_OTHERS` — spare process tree
+**Files:** `src/llm.py` (`MaxClient._kill_stray_claude`, new `_protected_pids`), `scripts/run_verify_max.sh`, `scripts/run_pipeline.py` (doc only)
+**Effort:** 1–2h
+**Context / why:**
+`MaxClient._kill_stray_claude` (opt-in via `CLAUDE_MAX_KILL_OTHERS=1`) originally spared only `os.getpid()`. Two breakages surfaced during M2-S4 verify runs:
+1. **Sibling-worker SIGKILL race.** With `STAGE4_CONCURRENCY>1`, threads in the same process call `_kill_stray_claude` before spawning their own CLI child. `pgrep -f claude` finds a sibling's in-flight CLI, kills it → subprocess returns `rc=-9` with empty stderr → `RuntimeError: claude CLI failed rc=-9`.
+2. **Parent Claude Code session killed.** If the pipeline runs inside a Claude Code interactive session, the parent `claude` process matches the pattern and gets SIGKILL'd, terminating the user's session.
+
+**What to build:**
+- New helper `MaxClient._protected_pids() -> set[int]` that collects:
+  - `os.getpid()` (self).
+  - All ancestors via `/proc/<pid>/status` `PPid:` walk (stop at `1` or seen).
+  - All descendants of every protected pid via BFS over `pgrep -P <parent>`.
+- `_kill_stray_claude` skips any pid in the protected set. All other `claude_agent_sdk/_bundled/claude` and `^claude($| )` matches are still `kill -9`'d.
+- Lock (`threading.Lock`) serializes concurrent callers.
+- Runs of the pipeline / verify scripts must configure `CLAUDE_MAX_KILL_OTHERS=1` explicitly — orchestrator does **not** set it by default. `scripts/run_verify_max.sh` keeps the existing export so batch runs sweep leftover CLI procs from prior crashed runs.
+- Document in `scripts/run_pipeline.py --help` that `CLAUDE_MAX_KILL_OTHERS=1` is safe to set even when running inside a parent Claude Code session, because the ancestor chain is protected.
+
+**Pytest (offline, `tests/test_llm.py`):**
+- `test_protected_pids_includes_self` — set contains `os.getpid()`.
+- `test_protected_pids_includes_ancestors` — monkeypatch `/proc/<pid>/status` reader → walk collects synthetic parent chain, stops at pid 1.
+- `test_protected_pids_includes_descendants` — monkeypatch `pgrep -P` output → BFS collects 2-level children.
+- `test_kill_stray_spares_protected` — monkeypatch `pgrep -f` to return `{protected_pid, stray_pid}`; monkeypatch `os.kill` to record invocations → only `stray_pid` killed.
+- `test_kill_stray_lock_serializes` — two threads call concurrently → `os.kill` call sequence linearized.
+
+**Smoke:** re-run `bash scripts/run_verify_max.sh` with `STAGE4_CONCURRENCY=5` and verify no `rc=-9` errors across ≥16 Haiku batch calls; the parent Claude Code session (if any) must survive.
+
+**Acceptance:**
+```bash
+uv run pytest tests/test_llm.py::test_kill_stray_spares_protected -q
+CLAUDE_MAX_KILL_OTHERS=1 STAGE4_CONCURRENCY=5 bash scripts/run_verify_max.sh
+# Stage 4 exit=0; no rc=-9 errors; this Claude Code session still alive.
+```
+
 ### Risks & open items
 
 | Risk | Mitigation |
@@ -815,6 +849,7 @@ uv run python -m scripts.run_pipeline --budget-usd 10.00 --force         # ~$6-8
 | M3-T2 | Prompt-tuning loop for Stage 6 (≥16/20) | 2–4h | M2-S6-T2 | $0.50 |
 | M3-T3 | Full-corpus run | 1h | all M2 | $6–8 |
 | M3-T4 | Human review + script v2 draft | 3h | M3-T3 | $0.30 |
+| M2-OPS-T1 | Safe `CLAUDE_MAX_KILL_OTHERS` — spare ancestor/descendant process tree | 1–2h | M0-T2 | $0 |
 
 **Total effort:** ~72–87 dev-hours (~2 working weeks for one developer). (+2h for dual-client LLM auth.)
 **Total LLM spend projection:** $8–10 including calibration iterations.

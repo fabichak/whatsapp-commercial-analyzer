@@ -165,13 +165,196 @@ class ApiClient:
         return text, delta
 
 
+def _find_bundled_cli() -> Optional[str]:
+    try:
+        import claude_agent_sdk  # noqa: F401
+    except ImportError:
+        return None
+    sdk_dir = Path(claude_agent_sdk.__file__).parent
+    p = sdk_dir / "_bundled" / "claude"
+    return str(p) if p.exists() else None
+
+
 class MaxClient:
-    """claude-agent-sdk wrapper. OAuth session from `claude login`. Flat-rate."""
+    """claude-agent-sdk wrapper. OAuth session from `claude login`. Flat-rate.
+
+    Two transport paths:
+    - default (SDK stream-json): hangs on WSL2 for some inputs.
+    - oneshot (env `CLAUDE_MAX_ONESHOT=1`): invoke bundled CLI with `-p`
+      and `--output-format json`. Subprocess runs to completion, avoiding
+      the streaming-pipe deadlock. WSL2-safe.
+    """
 
     def __init__(self):
         import claude_agent_sdk  # noqa: F401 — verify install
 
         self._sdk = claude_agent_sdk
+        self._oneshot = os.environ.get("CLAUDE_MAX_ONESHOT", "") == "1"
+        self._cli_path = _find_bundled_cli() if self._oneshot else None
+        self._timeout_s = float(os.environ.get("CLAUDE_MAX_TIMEOUT_S", "120"))
+        self._kill_others = os.environ.get("CLAUDE_MAX_KILL_OTHERS", "") == "1"
+        self._kill_lock = None  # lazy init (threading import)
+
+    def _protected_pids(self) -> set[int]:
+        """PIDs that must never be killed: self, all ancestors, and all
+        descendants of self or ancestors. Spares the parent Claude Code
+        session and any in-flight CLI children spawned by sibling threads.
+        """
+        import subprocess
+        protected: set[int] = {os.getpid()}
+        # Walk ancestor chain via /proc/<pid>/status PPid.
+        pid = os.getpid()
+        for _ in range(64):
+            try:
+                with open(f"/proc/{pid}/status") as f:
+                    ppid = 0
+                    for line in f:
+                        if line.startswith("PPid:"):
+                            ppid = int(line.split()[1])
+                            break
+            except (FileNotFoundError, ValueError, PermissionError, OSError):
+                break
+            if ppid <= 1 or ppid in protected:
+                break
+            protected.add(ppid)
+            pid = ppid
+        # BFS descendants of every protected pid.
+        frontier = list(protected)
+        while frontier:
+            parent = frontier.pop()
+            try:
+                out = subprocess.run(
+                    ["pgrep", "-P", str(parent)],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+            for tok in out.stdout.split():
+                if tok.isdigit():
+                    cp = int(tok)
+                    if cp not in protected:
+                        protected.add(cp)
+                        frontier.append(cp)
+        return protected
+
+    def _kill_stray_claude(self) -> None:
+        """Kill other `claude` processes (interactive + stale bundled subprocs).
+        Opt-in via env CLAUDE_MAX_KILL_OTHERS=1. Spares this process tree
+        (ancestors + descendants) so parent Claude Code session and sibling
+        worker CLI subprocesses survive.
+        """
+        import subprocess
+        import threading
+        if self._kill_lock is None:
+            self._kill_lock = threading.Lock()
+        with self._kill_lock:
+            protected = self._protected_pids()
+            for pat in ("claude_agent_sdk/_bundled/claude", "^claude($| )"):
+                try:
+                    out = subprocess.run(
+                        ["pgrep", "-f", pat], capture_output=True, text=True, timeout=5,
+                    )
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    continue
+                pids = [int(p) for p in out.stdout.split() if p.isdigit()]
+                for pid in pids:
+                    if pid in protected:
+                        continue
+                    try:
+                        os.kill(pid, 9)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        pass
+
+    def _complete_oneshot(
+        self,
+        model: str,
+        messages: list[dict],
+        system: str,
+        max_tokens: int,
+        response_format: Optional[Type[BaseModel]],
+    ) -> tuple[Any, UsageDelta]:
+        """WSL2-safe: invoke bundled CLI with `-p` + JSON output."""
+        import subprocess
+
+        prompt_parts: list[str] = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if isinstance(content, list):
+                content = "".join(
+                    c.get("text", "") if isinstance(c, dict) else str(c) for c in content
+                )
+            prompt_parts.append(f"[{role}]\n{content}")
+        prompt = "\n\n".join(prompt_parts)
+
+        structured = response_format is not None and issubclass(response_format, BaseModel)
+        if structured:
+            schema_json = json.dumps(response_format.model_json_schema(), ensure_ascii=False)
+            prompt += (
+                "\n\nReply ONLY with a single JSON object matching this schema "
+                "(no prose, no code fences):\n" + schema_json
+            )
+
+        cli = self._cli_path or _find_bundled_cli()
+        if cli is None:
+            raise ConfigError("bundled claude CLI not found")
+
+        if self._kill_others:
+            self._kill_stray_claude()
+
+        cmd = [
+            cli, "-p", prompt,
+            "--model", model,
+            "--output-format", "json",
+            "--max-turns", "1",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        ]
+        if system:
+            cmd.extend(["--system-prompt", system])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout_s,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise MaxRateLimitError(message=f"CLI timeout after {self._timeout_s}s") from e
+
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").lower()
+            if "rate" in err and "limit" in err:
+                raise MaxRateLimitError(message=proc.stderr)
+            raise RuntimeError(f"claude CLI failed rc={proc.returncode}: {proc.stderr[:500]}")
+
+        try:
+            envelope = json.loads(proc.stdout)
+        except json.JSONDecodeError as e:
+            raise SchemaError(f"CLI stdout not JSON: {proc.stdout[:500]}") from e
+
+        text_out = envelope.get("result") or ""
+        u = envelope.get("usage") or {}
+        delta = UsageDelta(
+            input_tokens=int(u.get("input_tokens", 0) or 0),
+            output_tokens=int(u.get("output_tokens", 0) or 0),
+            cache_read_input_tokens=int(u.get("cache_read_input_tokens", 0) or 0),
+            cache_creation_input_tokens=int(u.get("cache_creation_input_tokens", 0) or 0),
+        )
+
+        if structured:
+            raw = _extract_json(text_out)
+            try:
+                data = json.loads(raw)
+                return response_format.model_validate(data), delta
+            except (json.JSONDecodeError, ValidationError) as e:
+                raise SchemaError(
+                    f"Max CLI response failed schema validation: {e}; raw={text_out!r}"
+                ) from e
+        return text_out, delta
 
     def _complete(
         self,
@@ -181,6 +364,9 @@ class MaxClient:
         max_tokens: int,
         response_format: Optional[Type[BaseModel]],
     ) -> tuple[Any, UsageDelta]:
+        if self._oneshot:
+            return self._complete_oneshot(model, messages, system, max_tokens, response_format)
+
         import anyio
         from claude_agent_sdk import (
             AssistantMessage,

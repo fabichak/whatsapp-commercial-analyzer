@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -31,6 +33,7 @@ log = logging.getLogger(__name__)
 LABEL_MODEL = "claude-haiku-4-5"
 LABEL_MAX_TOKENS = 256
 SPA_PROMPT_RELPATH = "stage4_spa_template.md"
+SPA_BATCH_PROMPT_RELPATH = "stage4_spa_template_batch.md"
 CUSTOMER_PROMPT_RELPATH = "stage4_customer_batch.md"
 
 TEMPLATES_RELPATH = "spa_templates.json"
@@ -59,6 +62,17 @@ class SpaTemplateLabel(BaseModel):
     step_id: str
     matches_script: bool
     deviation_note: Optional[str] = None
+
+
+class SpaTemplateBatchItem(BaseModel):
+    template_id: int
+    step_id: str
+    matches_script: bool
+    deviation_note: Optional[str] = None
+
+
+class SpaTemplateBatchResult(BaseModel):
+    items: list[SpaTemplateBatchItem]
 
 
 class CustomerLabel(BaseModel):
@@ -143,19 +157,93 @@ def _label_one_template(
 # ---------------- public API ----------------
 
 
+def _label_template_batch(
+    ctx: Context, system: str, steps_summary: str, batch: list[SpaTemplate]
+) -> dict[int, SpaTemplateLabel]:
+    payload = [
+        {"template_id": t.template_id, "text": t.canonical_text}
+        for t in batch
+    ]
+    user_msg = (
+        "SCRIPT_STEPS:\n" + steps_summary
+        + "\n\nTEMPLATES (JSON):\n" + json.dumps(payload, ensure_ascii=False)
+        + "\n\nClassifique cada item conforme instruído."
+    )
+    result = ctx.client.complete(
+        model=LABEL_MODEL,
+        messages=[{"role": "user", "content": user_msg}],
+        system=system,
+        max_tokens=min(8192, 256 * max(1, len(batch))),
+        response_format=SpaTemplateBatchResult,
+    )
+    if not isinstance(result, SpaTemplateBatchResult):
+        raise TypeError(f"expected SpaTemplateBatchResult, got {type(result).__name__}")
+    want = {t.template_id for t in batch}
+    out: dict[int, SpaTemplateLabel] = {}
+    for it in result.items:
+        if it.template_id not in want:
+            log.warning("stage4: batch returned unknown template_id %d", it.template_id)
+            continue
+        if it.step_id not in VALID_STEP_IDS:
+            raise ValueError(f"invalid step_id {it.step_id!r}")
+        out[it.template_id] = SpaTemplateLabel(
+            step_id=it.step_id,
+            matches_script=it.matches_script,
+            deviation_note=it.deviation_note,
+        )
+    missing = want - set(out)
+    if missing:
+        log.warning("stage4: batch missing %d labels: %s", len(missing), sorted(missing)[:5])
+    return out
+
+
 def label_spa_templates(ctx: Context) -> dict[int, SpaTemplateLabel]:
-    """One Haiku call per template. Writes data/spa_template_labels.json."""
+    """Haiku template labeling. Writes data/spa_template_labels.json.
+
+    Env:
+    - STAGE4_TEMPLATE_BATCH_SIZE (default 1): templates per LLM call.
+    - STAGE4_CONCURRENCY (default 8): parallel workers.
+    """
     if ctx.client is None:
         raise RuntimeError("label_spa_templates requires ctx.client")
 
     templates = _load_templates(ctx)
-    system = _read_prompt(ctx)
     steps_summary = _steps_summary(ctx)
+    batch_size = max(1, int(os.environ.get("STAGE4_TEMPLATE_BATCH_SIZE", "1")))
+    workers = max(1, int(os.environ.get("STAGE4_CONCURRENCY", "8")))
 
     labels: dict[int, SpaTemplateLabel] = {}
-    for tmpl in tqdm(templates, desc="stage4: spa templates", disable=None):
-        label = _label_one_template(ctx, system, steps_summary, tmpl.canonical_text)
-        labels[tmpl.template_id] = label
+
+    if batch_size == 1:
+        system = _read_prompt(ctx)
+        if workers == 1:
+            for tmpl in tqdm(templates, desc="stage4: spa templates", disable=None):
+                labels[tmpl.template_id] = _label_one_template(
+                    ctx, system, steps_summary, tmpl.canonical_text
+                )
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = {
+                    pool.submit(_label_one_template, ctx, system, steps_summary, t.canonical_text): t.template_id
+                    for t in templates
+                }
+                for fut in tqdm(as_completed(futs), total=len(futs), desc="stage4: spa templates", disable=None):
+                    labels[futs[fut]] = fut.result()
+    else:
+        batch_prompt_path = ctx.prompts_dir / SPA_BATCH_PROMPT_RELPATH
+        if not batch_prompt_path.exists():
+            raise FileNotFoundError(f"missing batch prompt: {batch_prompt_path}")
+        system = batch_prompt_path.read_text(encoding="utf-8")
+        batches = [templates[i:i + batch_size] for i in range(0, len(templates), batch_size)]
+        log.info("stage4: spa templates batched — %d batches × up to %d", len(batches), batch_size)
+        if workers == 1:
+            for b in tqdm(batches, desc="stage4: spa template batches", disable=None):
+                labels.update(_label_template_batch(ctx, system, steps_summary, b))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = [pool.submit(_label_template_batch, ctx, system, steps_summary, b) for b in batches]
+                for fut in tqdm(as_completed(futs), total=len(futs), desc="stage4: spa template batches", disable=None):
+                    labels.update(fut.result())
 
     out = ctx.data_dir / SPA_LABELS_RELPATH
     out.write_text(
@@ -284,8 +372,7 @@ def label_customer_messages(ctx: Context) -> dict[int, CustomerLabel]:
     objections_block = _objection_triggers_block(ctx)
     batches = _pack_customer_batches(items, CUSTOMER_BATCH_SIZE)
 
-    labels: dict[int, CustomerLabel] = {}
-    for batch in tqdm(batches, desc="stage4: customer batches", disable=None):
+    def _run_batch(batch: list[dict]) -> tuple[list[dict], CustomerBatchResult]:
         user_msg = _build_customer_user_msg(steps_summary, objections_block, batch)
         result = ctx.client.complete(
             model=LABEL_MODEL,
@@ -298,6 +385,12 @@ def label_customer_messages(ctx: Context) -> dict[int, CustomerLabel]:
             raise TypeError(
                 f"expected CustomerBatchResult, got {type(result).__name__}"
             )
+        return batch, result
+
+    labels: dict[int, CustomerLabel] = {}
+    workers = max(1, int(os.environ.get("STAGE4_CONCURRENCY", "8")))
+
+    def _absorb(batch: list[dict], result: CustomerBatchResult) -> None:
         expected_ids = {it["msg_id"] for it in batch}
         for lb in result.items:
             _validate_customer_label(lb)
@@ -308,6 +401,15 @@ def label_customer_messages(ctx: Context) -> dict[int, CustomerLabel]:
         missing = expected_ids - {lb.msg_id for lb in result.items}
         if missing:
             log.warning("stage4: customer batch missing %d labels: %s", len(missing), sorted(missing)[:5])
+
+    if workers == 1:
+        for batch in tqdm(batches, desc="stage4: customer batches", disable=None):
+            _absorb(*_run_batch(batch))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_run_batch, b) for b in batches]
+            for fut in tqdm(as_completed(futs), total=len(futs), desc="stage4: customer batches", disable=None):
+                _absorb(*fut.result())
 
     out = ctx.data_dir / CUSTOMER_LABELS_RELPATH
     out.write_text(

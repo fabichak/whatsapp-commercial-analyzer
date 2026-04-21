@@ -1,0 +1,48 @@
+=== env -u STAGE4_TEMPLATE_BATCH_SIZE -u STAGE4_CONCURRENCY -u STAGE4_VERIFY_TEMPLATE_LIMIT -u CLAUDE_MAX_ONESHOT -u CLAUDE_MAX_KILL_OTHERS uv run pytest tests/test_script_index.py tests/test_label.py -q ===
+.........................                                                [100%]
+25 passed in 0.55s
+--- exit=0 ---
+=== uv run python -m scripts.verify_stage3_max ===
+max_calls=1 api_calls=0 api_cost=$0.0000
+OK — 4 pitch steps, 9 objection_replies, 6 inconsistencies
+--- exit=0 ---
+=== uv run python -m scripts.verify_stage4_max ===
+verify: using 50/229 templates, 287/466 map entries
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/martin/whatsapp-commercial-analyzer/scripts/verify_stage4_max.py", line 131, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/martin/whatsapp-commercial-analyzer/scripts/verify_stage4_max.py", line 70, in main
+    stage4_run(ctx)
+  File "/home/martin/whatsapp-commercial-analyzer/src/label.py", line 462, in run
+    label_spa_templates(ctx)
+  File "/home/martin/whatsapp-commercial-analyzer/src/label.py", line 246, in label_spa_templates
+    labels.update(fut.result())
+                  ^^^^^^^^^^^^
+  File "/home/martin/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/martin/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/home/martin/.local/share/uv/python/cpython-3.11.15-linux-x86_64-gnu/lib/python3.11/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/martin/whatsapp-commercial-analyzer/src/label.py", line 172, in _label_template_batch
+    result = ctx.client.complete(
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/home/martin/whatsapp-commercial-analyzer/src/llm.py", line 590, in complete
+    return self._max_call(
+           ^^^^^^^^^^^^^^^
+  File "/home/martin/whatsapp-commercial-analyzer/src/llm.py", line 565, in _max_call
+    result, delta = self._max._complete(
+                    ^^^^^^^^^^^^^^^^^^^^
+  File "/home/martin/whatsapp-commercial-analyzer/src/llm.py", line 327, in _complete
+    return self._complete_oneshot(model, messages, system, max_tokens, response_format)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/martin/whatsapp-commercial-analyzer/src/llm.py", line 291, in _complete_oneshot
+    raise RuntimeError(f"claude CLI failed rc={proc.returncode}: {proc.stderr[:500]}")
+RuntimeError: claude CLI failed rc=-9: 
+--- exit=1 ---
+DONE — log at scripts/verify_max.log

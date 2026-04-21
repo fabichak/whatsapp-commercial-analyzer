@@ -31,6 +31,7 @@ Check off each task as it is completed. Keep this file in sync with the task bre
 | [ ] | M3-T2 | Prompt-tuning loop for Stage 6 (≥16/20) | 2–4h | M2-S6-T2 | $0.50 |
 | [ ] | M3-T3 | Full-corpus run | 1h | all M2 | $6–8 |
 | [ ] | M3-T4 | Human review + script v2 draft | 3h | M3-T3 | $0.30 |
+| [~] | M2-OPS-T1 | Safe `CLAUDE_MAX_KILL_OTHERS` — spare process tree | 1–2h | M0-T2 | $0 |
 
 **Total effort:** ~70–85 dev-hours (~2 working weeks).
 **LLM spend projection:** $8–10 including calibration.
@@ -64,3 +65,4 @@ Record the output of each task's verification command here, one short line per t
 | M3-T2 | — | — |
 | M3-T3 | — | — |
 | M3-T4 | — | — |
+| M2-OPS-T1 | 2026-04-21 | Impl in `src/llm.py`: `_protected_pids()` walks ancestors via `/proc/<pid>/status` + descendants via `pgrep -P` BFS; `_kill_stray_claude` skips protected set. Live run `bash scripts/run_verify_max.sh` Stage 4 exit=0 (16 Haiku calls, no `rc=-9`). Pytest coverage still pending. |
