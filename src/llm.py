@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,18 @@ from pydantic import BaseModel, ValidationError
 from src.exceptions import BudgetExceeded, ConfigError, SchemaError
 
 log = logging.getLogger(__name__)
+
+
+def _extract_json(text: str) -> str:
+    s = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL)
+    if fence:
+        s = fence.group(1).strip()
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return s[start : end + 1]
+    return s
 
 # USD per 1M tokens, keyed by aliased (undated) model id.
 PRICES: dict[str, dict[str, float]] = {
@@ -239,11 +252,14 @@ class MaxClient:
         )
 
         if structured:
+            raw = _extract_json(text_out)
             try:
-                data = json.loads(text_out.strip())
+                data = json.loads(raw)
                 return response_format.model_validate(data), delta
             except (json.JSONDecodeError, ValidationError) as e:
-                raise SchemaError(f"Max response failed schema validation: {e}") from e
+                raise SchemaError(
+                    f"Max response failed schema validation: {e}; raw={text_out!r}"
+                ) from e
 
         return text_out, delta
 
