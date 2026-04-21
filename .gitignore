@@ -1,6 +1,8 @@
 *Zone.Identifier
 .env
 data/
+!data/script.yaml
+!data/ground_truth_outcomes.csv
 output/
 __pycache__/
 *.pyc
