@@ -1,12 +1,14 @@
 """Stage 4: labeling.
 
-M2-S4-T1 (this module): spa-template step labeling via Haiku. One LLM
-call per unique SpaTemplate; labels propagate to every instance via
+M2-S4-T1: spa-template step labeling via Haiku. One LLM call per
+unique SpaTemplate; labels propagate to every instance via
 `data/spa_message_template_map.json`.
 
-Customer-side labels (M2-S4-T2) stay stubbed until that task lands.
+M2-S4-T2: customer-message labeling via Haiku. Cross-chat batches of
+30 customer messages per call; each item carries its own chat_id and
+step_context_hint (last 3 spa msgs from same chat).
 
-See TECH_PLAN.md §M2-S4-T1.
+See TECH_PLAN.md §M2-S4-T1, §M2-S4-T2.
 """
 
 from __future__ import annotations
@@ -29,20 +31,46 @@ log = logging.getLogger(__name__)
 LABEL_MODEL = "claude-haiku-4-5"
 LABEL_MAX_TOKENS = 256
 SPA_PROMPT_RELPATH = "stage4_spa_template.md"
+CUSTOMER_PROMPT_RELPATH = "stage4_customer_batch.md"
 
 TEMPLATES_RELPATH = "spa_templates.json"
 TEMPLATE_MAP_RELPATH = "spa_message_template_map.json"
 SPA_LABELS_RELPATH = "spa_template_labels.json"
+CUSTOMER_LABELS_RELPATH = "customer_labels.json"
 LABELED_RELPATH = "labeled_messages.jsonl"
 SCRIPT_YAML_RELPATH = "script.yaml"
 
 VALID_STEP_IDS = {"1", "2", "3", "3.5", "5", "6", "7", "fup1", "fup2"}
+VALID_STEP_CONTEXTS = {"on_script", "off_script", "transition", "unknown"}
+VALID_OBJECTION_IDS = {
+    "price", "location", "time_slot", "competitor",
+    "hesitation_vou_pensar", "delegated_talk_to_someone",
+    "delayed_response_te_falo", "trust_boundary_male", "other",
+}
+VALID_SENTIMENTS = {"pos", "neu", "neg"}
+
+CUSTOMER_BATCH_SIZE = 30
+CUSTOMER_BATCH_MAX_TOKENS = 2048
+CUSTOMER_HINT_WINDOW = 3
+CUSTOMER_HINT_CHARS = 140
 
 
 class SpaTemplateLabel(BaseModel):
     step_id: str
     matches_script: bool
     deviation_note: Optional[str] = None
+
+
+class CustomerLabel(BaseModel):
+    msg_id: int
+    step_context: Literal["on_script", "off_script", "transition", "unknown"]
+    intent: Optional[str] = None
+    objection_type: Optional[str] = None
+    sentiment: Optional[Literal["pos", "neu", "neg"]] = None
+
+
+class CustomerBatchResult(BaseModel):
+    items: list[CustomerLabel]
 
 
 # ---------------- helpers ----------------
@@ -142,6 +170,169 @@ def label_spa_templates(ctx: Context) -> dict[int, SpaTemplateLabel]:
     return labels
 
 
+# ---------------- customer batching (M2-S4-T2) ----------------
+
+
+def _read_customer_prompt(ctx: Context) -> str:
+    p = ctx.prompts_dir / CUSTOMER_PROMPT_RELPATH
+    if not p.exists():
+        raise FileNotFoundError(f"missing prompt: {p}")
+    return p.read_text(encoding="utf-8")
+
+
+def _objection_triggers_block(ctx: Context) -> str:
+    """PT-BR list of objection ids + example triggers, pulled from script.yaml."""
+    path = ctx.data_dir / SCRIPT_YAML_RELPATH
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    tax = doc.get("objection_taxonomy", []) or []
+    lines: list[str] = []
+    for obj in tax:
+        oid = obj.get("id")
+        if oid not in VALID_OBJECTION_IDS:
+            continue
+        trig = obj.get("triggers", []) or []
+        sample = ", ".join(str(t) for t in trig[:5])
+        lines.append(f'- id="{oid}" ({obj.get("name_pt","")}) — gatilhos: {sample}')
+    return "\n".join(lines) if lines else "(taxonomia não disponível)"
+
+
+def _collect_customer_items(convos_path: Path) -> list[dict]:
+    """Flatten all customer (from_me=False, non-empty text) msgs into
+    envelope dicts carrying chat_id + rolling last-3-spa hint.
+    """
+    items: list[dict] = []
+    with convos_path.open("r", encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            convo = Conversation.model_validate_json(line)
+            hint: list[str] = []
+            for m in convo.messages:
+                if m.from_me:
+                    txt = m.text.strip()
+                    if txt:
+                        snip = txt[:CUSTOMER_HINT_CHARS]
+                        hint.append(snip)
+                        if len(hint) > CUSTOMER_HINT_WINDOW:
+                            hint = hint[-CUSTOMER_HINT_WINDOW:]
+                    continue
+                text = m.text.strip()
+                if not text:
+                    continue
+                items.append({
+                    "msg_id": m.msg_id,
+                    "chat_id": convo.chat_id,
+                    "text": text,
+                    "step_context_hint": list(hint),
+                })
+    return items
+
+
+def _pack_customer_batches(
+    items: list[dict], size: int = CUSTOMER_BATCH_SIZE
+) -> list[list[dict]]:
+    """Greedy cross-chat pack: fill every batch to `size`; last batch may be smaller."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _build_customer_user_msg(
+    steps_summary: str, objections_block: str, batch: list[dict]
+) -> str:
+    return (
+        "SCRIPT_STEPS:\n"
+        + steps_summary
+        + "\n\nOBJECTION_TYPES:\n"
+        + objections_block
+        + "\n\nBATCH (JSON):\n"
+        + json.dumps(batch, ensure_ascii=False)
+        + "\n\nRotule cada item do BATCH conforme instruído. Retorne "
+        "um objeto com a chave `items` contendo um objeto por entrada, "
+        "na mesma ordem, com os mesmos `msg_id`."
+    )
+
+
+def _validate_customer_label(lb: CustomerLabel) -> None:
+    if lb.step_context not in VALID_STEP_CONTEXTS:
+        raise ValueError(f"invalid step_context {lb.step_context!r}")
+    if lb.objection_type is not None and lb.objection_type not in VALID_OBJECTION_IDS:
+        raise ValueError(f"invalid objection_type {lb.objection_type!r}")
+    if lb.sentiment is not None and lb.sentiment not in VALID_SENTIMENTS:
+        raise ValueError(f"invalid sentiment {lb.sentiment!r}")
+
+
+def label_customer_messages(ctx: Context) -> dict[int, CustomerLabel]:
+    """Cross-chat batches of 30 customer messages per Haiku call.
+    Writes data/customer_labels.json keyed by msg_id (string).
+    """
+    if ctx.client is None:
+        raise RuntimeError("label_customer_messages requires ctx.client")
+
+    convos_path = ctx.data_dir / "conversations.jsonl"
+    if not convos_path.exists():
+        raise FileNotFoundError(f"missing stage 1 output: {convos_path}")
+
+    items = _collect_customer_items(convos_path)
+    if not items:
+        log.info("stage4: no customer messages to label")
+        out = ctx.data_dir / CUSTOMER_LABELS_RELPATH
+        out.write_text("{}", encoding="utf-8")
+        return {}
+
+    system = _read_customer_prompt(ctx)
+    steps_summary = _steps_summary(ctx)
+    objections_block = _objection_triggers_block(ctx)
+    batches = _pack_customer_batches(items, CUSTOMER_BATCH_SIZE)
+
+    labels: dict[int, CustomerLabel] = {}
+    for batch in tqdm(batches, desc="stage4: customer batches", disable=None):
+        user_msg = _build_customer_user_msg(steps_summary, objections_block, batch)
+        result = ctx.client.complete(
+            model=LABEL_MODEL,
+            messages=[{"role": "user", "content": user_msg}],
+            system=system,
+            max_tokens=CUSTOMER_BATCH_MAX_TOKENS,
+            response_format=CustomerBatchResult,
+        )
+        if not isinstance(result, CustomerBatchResult):
+            raise TypeError(
+                f"expected CustomerBatchResult, got {type(result).__name__}"
+            )
+        expected_ids = {it["msg_id"] for it in batch}
+        for lb in result.items:
+            _validate_customer_label(lb)
+            if lb.msg_id not in expected_ids:
+                log.warning("stage4: customer batch returned unknown msg_id %d", lb.msg_id)
+                continue
+            labels[lb.msg_id] = lb
+        missing = expected_ids - {lb.msg_id for lb in result.items}
+        if missing:
+            log.warning("stage4: customer batch missing %d labels: %s", len(missing), sorted(missing)[:5])
+
+    out = ctx.data_dir / CUSTOMER_LABELS_RELPATH
+    out.write_text(
+        json.dumps(
+            {str(mid): lb.model_dump() for mid, lb in labels.items()},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    log.info(
+        "stage4: wrote %d customer labels (%d batches) → %s",
+        len(labels), len(batches), out,
+    )
+    return labels
+
+
+def _load_customer_labels(ctx: Context) -> dict[int, CustomerLabel]:
+    p = ctx.data_dir / CUSTOMER_LABELS_RELPATH
+    if not p.exists():
+        return {}
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    return {int(k): CustomerLabel.model_validate(v) for k, v in raw.items()}
+
+
 def _load_spa_labels(ctx: Context) -> dict[int, SpaTemplateLabel]:
     p = ctx.data_dir / SPA_LABELS_RELPATH
     if not p.exists():
@@ -170,14 +361,22 @@ def run(ctx: Context) -> dict:
     else:
         log.info("stage4: spa_template_labels.json exists, skipping (use --force)")
 
+    customer_labels_path = ctx.data_dir / CUSTOMER_LABELS_RELPATH
+    if not customer_labels_path.exists() or ctx.force:
+        label_customer_messages(ctx)
+    else:
+        log.info("stage4: customer_labels.json exists, skipping (use --force)")
+
     template_map = _load_template_map(ctx)
     spa_labels = _load_spa_labels(ctx)
+    customer_labels = _load_customer_labels(ctx)
 
     out_path = ctx.data_dir / LABELED_RELPATH
     ctx.data_dir.mkdir(parents=True, exist_ok=True)
 
     n = 0
     n_spa_labeled = 0
+    n_cust_labeled = 0
     with convos_path.open("r", encoding="utf-8") as fin, out_path.open(
         "w", encoding="utf-8"
     ) as fout:
@@ -190,6 +389,9 @@ def run(ctx: Context) -> dict:
                 step_id: Optional[str] = None
                 matches_script: Optional[bool] = None
                 deviation_note: Optional[str] = None
+                intent: Optional[str] = None
+                objection_type: Optional[str] = None
+                sentiment: Optional[Literal["pos", "neu", "neg"]] = None
                 step_context: Literal["on_script", "off_script", "transition", "unknown"] = "unknown"
 
                 if m.from_me:
@@ -201,6 +403,14 @@ def run(ctx: Context) -> dict:
                         deviation_note = lab.deviation_note
                         step_context = _derive_step_context(matches_script)
                         n_spa_labeled += 1
+                else:
+                    clab = customer_labels.get(m.msg_id)
+                    if clab is not None:
+                        step_context = clab.step_context
+                        intent = clab.intent
+                        objection_type = clab.objection_type
+                        sentiment = clab.sentiment
+                        n_cust_labeled += 1
 
                 lm = LabeledMessage(
                     msg_id=m.msg_id,
@@ -208,9 +418,9 @@ def run(ctx: Context) -> dict:
                     from_me=m.from_me,
                     step_id=step_id,
                     step_context=step_context,
-                    intent=None,
-                    objection_type=None,
-                    sentiment=None,
+                    intent=intent,
+                    objection_type=objection_type,
+                    sentiment=sentiment,
                     matches_script=matches_script,
                     deviation_note=deviation_note,
                 )
@@ -218,8 +428,8 @@ def run(ctx: Context) -> dict:
                 n += 1
 
     log.info(
-        "stage4: %d labeled messages (%d spa labeled) → %s",
-        n, n_spa_labeled, out_path,
+        "stage4: %d labeled messages (spa=%d, cust=%d) → %s",
+        n, n_spa_labeled, n_cust_labeled, out_path,
     )
 
     api_cost = 0.0

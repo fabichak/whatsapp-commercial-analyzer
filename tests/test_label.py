@@ -10,8 +10,14 @@ from pathlib import Path
 import pytest
 
 from src.label import (
+    CUSTOMER_BATCH_SIZE,
+    CustomerBatchResult,
+    CustomerLabel,
     SpaTemplateLabel,
     VALID_STEP_IDS,
+    _collect_customer_items,
+    _pack_customer_batches,
+    label_customer_messages,
     label_spa_templates,
     run as stage4_run,
 )
@@ -186,6 +192,9 @@ def test_run_propagates_labels_to_all_instances(tmp_path):
         ],
     )
 
+    # pre-fill empty customer cache so this T1 test isolates spa labeling
+    (ctx.data_dir / "customer_labels.json").write_text("{}", encoding="utf-8")
+
     client = FakeClient(
         [
             SpaTemplateLabel(step_id="1", matches_script=True),
@@ -195,7 +204,7 @@ def test_run_propagates_labels_to_all_instances(tmp_path):
     ctx.client = client
     stage4_run(ctx)
 
-    # exactly 2 LLM calls (once per template).
+    # exactly 2 LLM calls (once per template); customer cache pre-filled.
     assert len(client.calls) == 2
 
     rows = [
@@ -273,3 +282,167 @@ def test_run_force_reruns_labeling(tmp_path):
 
 def test_valid_step_ids_constant():
     assert VALID_STEP_IDS == {"1", "2", "3", "3.5", "5", "6", "7", "fup1", "fup2"}
+
+
+# ---------------- M2-S4-T2 customer batching ----------------
+
+
+def test_customer_batching_packs_cross_chat(tmp_path):
+    """3 chats of 10/20/5 customer msgs → batches of 30, 5."""
+    ctx = _prep_ctx(tmp_path, None)
+
+    def _mk_chat(cid, n):
+        msgs = [_mk_msg(cid * 1000 + i, False, f"msg {i}") for i in range(n)]
+        return _mk_convo(cid, f"55110000{cid:04d}", msgs)
+
+    _write_convos(ctx.data_dir, [_mk_chat(1, 10), _mk_chat(2, 20), _mk_chat(3, 5)])
+    items = _collect_customer_items(ctx.data_dir / "conversations.jsonl")
+    assert len(items) == 35
+    batches = _pack_customer_batches(items, CUSTOMER_BATCH_SIZE)
+    assert [len(b) for b in batches] == [30, 5]
+    # cross-chat: batch0 packs chat1(10)+chat2(20); chat3(5) lands in batch1
+    assert {it["chat_id"] for it in batches[0]} == {1, 2}
+    assert {it["chat_id"] for it in batches[1]} == {3}
+
+
+def test_batch_envelope_has_chat_id_and_hint(tmp_path):
+    ctx = _prep_ctx(tmp_path, None)
+    convo = _mk_convo(
+        7, "5511000000007",
+        [
+            _mk_msg(1, True, "bom dia, seja bem-vinda"),
+            _mk_msg(2, True, "somos um spa day"),
+            _mk_msg(3, True, "temos day spa e massagens"),
+            _mk_msg(4, False, "quanto custa?"),
+        ],
+    )
+    _write_convos(ctx.data_dir, [convo])
+    items = _collect_customer_items(ctx.data_dir / "conversations.jsonl")
+    assert len(items) == 1
+    it = items[0]
+    assert it["chat_id"] == 7
+    assert it["msg_id"] == 4
+    assert it["text"] == "quanto custa?"
+    # last 3 spa msgs, chronological
+    assert it["step_context_hint"] == [
+        "bom dia, seja bem-vinda",
+        "somos um spa day",
+        "temos day spa e massagens",
+    ]
+
+
+def test_customer_label_applied_in_run(tmp_path):
+    ctx = _prep_ctx(tmp_path, None)
+    _write_templates(ctx.data_dir, [_mk_tmpl(0, "Bom dia", 1, [10])])
+    _write_map(ctx.data_dir, {10: 0})
+    _write_convos(
+        ctx.data_dir,
+        [_mk_convo(1, "5511000000001", [
+            _mk_msg(10, True, "Bom dia"),
+            _mk_msg(11, False, "achei caro"),
+        ])],
+    )
+    client = FakeClient([
+        SpaTemplateLabel(step_id="1", matches_script=True),
+        CustomerBatchResult(items=[
+            CustomerLabel(
+                msg_id=11, step_context="off_script",
+                intent="reclama do preço", objection_type="price", sentiment="neg",
+            ),
+        ]),
+    ])
+    ctx.client = client
+    stage4_run(ctx)
+
+    rows = [
+        LabeledMessage.model_validate_json(ln)
+        for ln in (ctx.data_dir / "labeled_messages.jsonl").read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    by_id = {r.msg_id: r for r in rows}
+    cust = by_id[11]
+    assert cust.step_context == "off_script"
+    assert cust.intent == "reclama do preço"
+    assert cust.objection_type == "price"
+    assert cust.sentiment == "neg"
+    # spa side still works
+    assert by_id[10].step_id == "1"
+    assert by_id[10].step_context == "on_script"
+
+
+def test_label_customer_messages_uses_haiku_and_schema(tmp_path):
+    ctx = _prep_ctx(tmp_path, None)
+    _write_convos(
+        ctx.data_dir,
+        [_mk_convo(1, "5511000000001", [
+            _mk_msg(10, True, "oi"),
+            _mk_msg(11, False, "quanto custa?"),
+        ])],
+    )
+    client = FakeClient([
+        CustomerBatchResult(items=[
+            CustomerLabel(msg_id=11, step_context="on_script", intent="pergunta preço"),
+        ]),
+    ])
+    ctx.client = client
+    labels = label_customer_messages(ctx)
+    assert 11 in labels
+    call = client.calls[0]
+    assert call["model"] == "claude-haiku-4-5"
+    assert call["response_format"] is CustomerBatchResult
+    # prompt carries batch JSON with chat_id + hint
+    user = call["messages"][0]["content"]
+    assert '"chat_id": 1' in user
+    assert "BATCH" in user and "OBJECTION_TYPES" in user and "SCRIPT_STEPS" in user
+
+
+def test_invalid_objection_type_raises(tmp_path):
+    ctx = _prep_ctx(tmp_path, None)
+    _write_convos(
+        ctx.data_dir,
+        [_mk_convo(1, "5511000000001", [_mk_msg(11, False, "x")])],
+    )
+    client = FakeClient([
+        CustomerBatchResult(items=[
+            CustomerLabel(msg_id=11, step_context="off_script", objection_type="bogus"),
+        ]),
+    ])
+    ctx.client = client
+    with pytest.raises(ValueError, match="invalid objection_type"):
+        label_customer_messages(ctx)
+
+
+def test_customer_label_run_skips_when_cache_exists(tmp_path):
+    ctx = _prep_ctx(tmp_path, None)
+    _write_templates(ctx.data_dir, [_mk_tmpl(0, "Olá", 1, [10])])
+    _write_map(ctx.data_dir, {10: 0})
+    _write_convos(
+        ctx.data_dir,
+        [_mk_convo(1, "5511000000001", [
+            _mk_msg(10, True, "Olá"),
+            _mk_msg(11, False, "oi"),
+        ])],
+    )
+    (ctx.data_dir / "spa_template_labels.json").write_text(
+        json.dumps({"0": {"step_id": "1", "matches_script": True, "deviation_note": None}}),
+        encoding="utf-8",
+    )
+    (ctx.data_dir / "customer_labels.json").write_text(
+        json.dumps({"11": {
+            "msg_id": 11, "step_context": "on_script",
+            "intent": "cumprimento", "objection_type": None, "sentiment": "neu",
+        }}),
+        encoding="utf-8",
+    )
+    client = FakeClient([])
+    ctx.client = client
+    stage4_run(ctx)
+    assert client.calls == []
+    rows = [
+        LabeledMessage.model_validate_json(ln)
+        for ln in (ctx.data_dir / "labeled_messages.jsonl").read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    by_id = {r.msg_id: r for r in rows}
+    assert by_id[11].intent == "cumprimento"
+    assert by_id[11].step_context == "on_script"
