@@ -8,9 +8,9 @@ Check off each task as it is completed. Keep this file in sync with the task bre
 
 | Status | ID | Title | Effort | Prereqs | LLM cost |
 |---|---|---|---|---|---|
-| [ ] | M0-T1 | Bootstrap project (uv, pyproject, gitignore, .env) | 1–2h | — | $0 |
-| [ ] | M0-T2 | `src/llm.py` — client, retry, budget, accounting | 3–4h | M0-T1 | $0 |
-| [ ] | M0-T3 | `src/schemas.py` + `src/context.py` | 2h | M0-T1 | $0 |
+| [x] | M0-T1 | Bootstrap project (uv, pyproject, gitignore, .env) | 1–2h | — | $0 |
+| [x] | M0-T2 | `src/llm.py` — client, retry, budget, accounting | 3–4h | M0-T1 | $0 |
+| [x] | M0-T3 | `src/schemas.py` + `src/context.py` | 2h | M0-T1 | $0 |
 | [ ] | M1-T1 | Orchestrator skeleton `scripts/run_pipeline.py` | 3h | M0-T3 | $0 |
 | [ ] | M1-T2 | Stage 1: load DB → conversations.jsonl | 4h | M1-T1 | $0 |
 | [ ] | M1-T3 | Stage 2: rapidfuzz dedupe | 3h | M1-T2 | $0 |

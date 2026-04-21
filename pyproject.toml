@@ -1,0 +1,25 @@
+[project]
+name = "whatsapp-commercial-analyzer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40",
+    "claude-agent-sdk>=0.1.64",
+    "hdbscan>=0.8.42",
+    "pandas>=3.0.2",
+    "pydantic>=2",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
+    "rapidfuzz>=3.14.5",
+    "sentence-transformers>=5.4.1",
+    "tqdm>=4.67.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.11",
+]
