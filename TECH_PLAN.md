@@ -81,7 +81,7 @@ Every M2 deepening task must keep the M1 slice passing. "`scripts/run_pipeline.p
 │   ├── verify_stage1.py             # smoke scripts per stage (executable)
 │   ├── verify_stage2.py
 │   ├── ...
-│   └── label_ground_truth.py        # helper: user labels 10 sample chats
+│   └── label_ground_truth.py        # helper: user labels 20 sample chats
 ├── src/
 │   ├── __init__.py
 │   ├── context.py                   # shared Context dataclass
@@ -313,7 +313,7 @@ Goal: `uv run python -m scripts.run_pipeline --chat-limit 5 --budget-usd 1.00` c
 **What to build:**
 - `run(ctx)`:
   1. Connect to `ctx.db_path` (read-only).
-  2. SQL: `SELECT m.*, c.jid_row_id, j.user, j.raw_string FROM message m JOIN chat c ON m.chat_row_id=c._id JOIN jid j ON c.jid_row_id=j._id WHERE m.message_type=0 AND m.text_data IS NOT NULL ORDER BY c._id, m.timestamp`.
+  2. SQL: `SELECT m.*, c.jid_row_id, c.group_type, j.user, j.raw_string FROM message m JOIN chat c ON m.chat_row_id=c._id JOIN jid j ON c.jid_row_id=j._id WHERE m.message_type=0 AND m.text_data IS NOT NULL AND c.group_type=0 ORDER BY c._id, m.timestamp`. (`group_type=0` → 1-to-1 chats only; no group chats.)
   3. Group by `chat_row_id`; for each group, produce `Conversation` with cleaned text (strip URLs via `re.sub(r"https?://\S+", "", t)`, collapse whitespace, preserve `text_raw`).
   4. Split: ≥20 messages → `data/conversations.jsonl`; <20 → `data/conversations_short.jsonl`.
   5. If `ctx.chat_limit` set, truncate the long list to first N (by chat_id asc, for determinism).
@@ -346,6 +346,7 @@ uv run python -m scripts.run_pipeline --stage 1 --chat-limit 5  # writes data/co
 **What to build:**
 - `run(ctx)`: read `data/conversations.jsonl`, extract all `from_me=True` messages, accent-normalize via `unicodedata.normalize('NFKD', t).encode('ascii','ignore').decode().lower()`, cluster with `rapidfuzz.process.cdist` token-set ratio at threshold 88 (union-find merge).
 - Output `data/spa_templates.json` matching `list[SpaTemplate]`.
+- **Also output** `data/spa_message_template_map.json` — `{str(msg_id): template_id}` covering every spa message (not just examples). Stage 4 uses this to propagate template labels.
 - Pick canonical text = instance with longest original text in cluster.
 
 **Pytest (offline):**
@@ -374,14 +375,14 @@ uv run python scripts/verify_stage2.py   # prints top 20 templates, all counts m
 **What to build (stub for M1):**
 - `run(ctx)`: if `data/script.yaml` exists and `ctx.force=False`, no-op (return existing). This lets M1 work without LLM cost.
 - Commit a hand-written `data/script.yaml` covering:
-  - 7 steps (ids `1, 2, 3, 3.5, 5, 6, 7`) with `name`, `canonical_texts` (copy-pasted from script-comercial.md), `expected_customer_intents` (3–5 per step guessed by developer).
+  - 9 steps (ids `1, 2, 3, 3.5, 5, 6, 7, fup1, fup2`) with `name`, `canonical_texts` (copy-pasted from script-comercial.md — FUP1/FUP2 blocks too), `expected_customer_intents` (3–5 per step guessed by developer).
   - `services`: Massagem Relaxante / Drenagem / Miofascial / Desportiva / Redutora / Facial / Shiatsu / Mini-day-spa / Day-spa with prices from the script.
   - `price_grid`: flattened from the Preços table (rows: service, persons, price, payment_rules).
   - `additionals`: 8 add-ons with prices.
   - `negotiation_rules`: 3 rules encoded as policy flags (`no_unsolicited_discount`, `mon_wed_5pct_dayspa`, `no_price_before_interest`).
   - `objection_taxonomy`: 9 canonical types (see `ObjectionType` schema) with PT-BR trigger words.
   - `promocoes`: dia-das-maes block with `valid_from: 2026-04-16`, `valid_until: 2026-05-17`, usage deadline `2026-06-30`.
-  - Empty `inferred_extensions:` (filled by M2 LLM expansion).
+  - **No** `inferred_extensions:` field — LLM output lives in a separate `data/script_extensions.yaml` (gitignored), not here. Stages 4/8 load both and merge in memory.
 
 **Pytest (offline, script parsing only — actual LLM expansion is M2):**
 - `test_script_yaml_loads` — loads, validates against Pydantic.
@@ -437,22 +438,26 @@ Each M2 task replaces a stubbed stage with the real implementation. After each t
 **Files:** `src/script_index.py`, `prompts/stage3_expand_script.md`
 **Effort:** 4h
 **What to build:**
-- Augment `script_index.run(ctx)`: if `script.yaml.inferred_extensions` is empty or `ctx.force`, call Sonnet with the full `script-comercial.md` + current YAML, asking for:
+- Augment `script_index.run(ctx)`: if `data/script_extensions.yaml` missing or `ctx.force`, call Sonnet with the full `script-comercial.md` + the committed `data/script.yaml`, asking for:
   - A tightened Day-Spa pitch flow (re-structures what's already there).
   - Standardized reply templates for each of the 9 objection types.
   - Flag internal inconsistencies (e.g., Massagem Especial price "R$285 por R$255" in promoções vs base R$200 — flag or explain).
-- Merge the LLM output into `script.yaml` under `inferred_extensions:`. The hand-curated top-level YAML is **not** modified.
+- **Write output to** `data/script_extensions.yaml` (gitignored, top-level keys: `day_spa_pitch`, `objection_replies`, `inconsistencies`). **Never** modify `data/script.yaml`.
+- Downstream: Stages 4/8 load both files and merge via `script_index.load_merged(ctx)`.
 - Budget guard: hard cap 8k output tokens.
 
 **Smoke (`scripts/verify_stage3.py`, real API):**
 - Runs the expansion.
-- Asserts: `inferred_extensions.day_spa_pitch.steps` has ≥3 items and mentions "escalda-pés" or "banho de imersão".
-- Asserts: `inferred_extensions.objection_replies` has entries for all 9 taxonomy ids.
+- Asserts: `script_extensions.yaml` exists; `day_spa_pitch.steps` has ≥3 items and mentions "escalda-pés" or "banho de imersão".
+- Asserts: `objection_replies` has entries for all 9 taxonomy ids.
+- Asserts: `data/script.yaml` byte-identical before/after (not modified).
 - Asserts: cost <$0.60.
 
 **Pytest (offline, with `fake_llm` for the `complete()` call):**
-- `test_expansion_merges_into_yaml` — mock returns canned JSON → loaded YAML has expected keys under `inferred_extensions`.
-- `test_expansion_skipped_when_populated` — pre-filled yaml → `complete()` not called.
+- `test_expansion_writes_extensions_file` — mock returns canned JSON → `data/script_extensions.yaml` has expected top-level keys.
+- `test_expansion_does_not_mutate_script_yaml` — checksum before/after matches.
+- `test_expansion_skipped_when_extensions_exist` — pre-existing `script_extensions.yaml` + `ctx.force=False` → `complete()` not called.
+- `test_load_merged_returns_combined_dict` — both files present → merged dict carries hand-curated keys AND extension keys under `extensions.*` (or agreed namespace).
 
 ### Stage 4 deepening
 
@@ -460,8 +465,9 @@ Each M2 task replaces a stubbed stage with the real implementation. After each t
 **Files:** `src/label.py`, `prompts/stage4_spa_template.md`
 **Effort:** 4h
 **What to build:**
-- For each `SpaTemplate`, call Haiku with the canonical text + the script steps summary → returns `{step_id, matches_script, deviation_note}`. Propagate to every instance of that template via `template_id` lookup (Stage 2 mapping).
+- For each `SpaTemplate`, call Haiku with the canonical text + the script steps summary (incl. `fup1`/`fup2`) → returns `{step_id, matches_script, deviation_note}`. Propagate to every instance of that template via `data/spa_message_template_map.json` (Stage 2 output).
 - Write `data/spa_template_labels.json` (indexed by template_id) as an intermediate; `label.py` consumer joins it onto messages.
+- Derive `step_context` per spa message: `matches_script=true → "on_script"`, `false → "off_script"`.
 - ~500 templates × ~500 tokens in × ~100 tokens out ≈ $1.00.
 
 **Pytest (offline, with `fake_llm`):**
@@ -470,16 +476,19 @@ Each M2 task replaces a stubbed stage with the real implementation. After each t
 
 **Smoke:** part of `scripts/verify_stage4.py` (shared with customer batching task).
 
-#### M2-S4-T2 · Customer message batching & tagging (Haiku, batches of 30)
+#### M2-S4-T2 · Customer message batching & tagging (Haiku, cross-chat batches of 30)
 **Files:** `src/label.py`, `prompts/stage4_customer_batch.md`
 **Effort:** 4h
 **What to build:**
-- Customer messages batched 30 at a time. Prompt includes: last 3 spa messages as `step_context_hint`, script step summaries, the 9 objection triggers.
+- **Cross-chat batching**: pack 30 customer messages per Haiku call, drawn from **any** chats (fill every batch to max). Final leftover batch may be <30.
+- Each message in the prompt carries its own envelope: `{msg_id, chat_id, text, step_context_hint: [last_3_spa_msgs_in_that_chat]}`. Model must not confuse messages across chats → prompt states "each item is independent; use only its own `step_context_hint`".
+- Prompt prefix (shared across all 500 calls): script step summaries + 9-type objection triggers. Same static content every call → candidate for future prompt-caching (tracked, not enforced per Decision 8).
 - Returns per-message `{msg_id, step_context, intent, objection_type|null, sentiment}`.
-- ~15k customer messages / 30 = 500 calls × ~1000 tokens in × ~500 tokens out ≈ $1.50.
+- ~15k customer messages / 30 = 500 calls × ~1500 tokens in × ~500 tokens out ≈ $1.50.
 
 **Pytest (offline):**
-- `test_customer_batching_respects_size` — 65 msgs → 3 calls (30, 30, 5).
+- `test_customer_batching_packs_cross_chat` — 3 chats of 10/20/5 msgs → batches of 30, 5 (not 10, 20, 5).
+- `test_batch_envelope_has_chat_id` — every prompt item includes chat_id + per-msg step_context_hint.
 - `test_off_script_flagged` — fake_llm returns `step_context=off_script` for a message like "tem estacionamento?" → persists.
 - `test_objection_type_recognized` — parametrize: "achei caro"→price, "muito longe"→location, "vou pensar"→hesitation_vou_pensar. Uses real Haiku on a batch of 9 (one per type) — actually this is the integration test below.
 
@@ -523,7 +532,9 @@ Each M2 task replaces a stubbed stage with the real implementation. After each t
 #### M2-S6-T2 · Conversion detection (Haiku, 1 call per chat)
 **Files:** `src/conversion.py`, `prompts/stage6_conversion.md`
 **Effort:** 5h
+**Prereqs:** M2-S6-T1 (truncation), **M2-S4-T2** (customer labels — objection indices feed the truncation window), M3-T1 (ground truth for few-shot).
 **What to build:**
+- Load `data/labeled_messages.jsonl` from Stage 4; collect `(chat_id, msg_idx, objection_type)` triples for messages with non-null `objection_type`. Pass these as `objection_indices` to `truncate_for_llm`.
 - For each of ~387 chats: truncate, send to Haiku with structured-output schema for `ConversationConversion`. Prompt explicitly enumerates the 9 objection types and includes 2 positive + 2 negative few-shot examples from the user's ground-truth set (hand-picked chats M3-T1).
 - Cost: 387 × ~2500 in × ~300 out ≈ $1.80.
 - Write `data/conversions.jsonl`.
@@ -534,9 +545,9 @@ Each M2 task replaces a stubbed stage with the real implementation. After each t
 - `test_phone_number_attached` — `jid.user` propagated into `ConversationConversion.phone`.
 
 **Smoke (`scripts/verify_stage6.py`, real API, small):**
-- Runs on 10 ground-truth chats only.
-- Asserts: ≥8/10 match the user's `outcome` label in `data/ground_truth_outcomes.csv` (booked vs lost). If fewer: exits non-zero with a prompt-tuning suggestion.
-- Cost <$0.10.
+- Runs on 20 ground-truth chats only.
+- Asserts: ≥16/20 match the user's `outcome` label in `data/ground_truth_outcomes.csv` (booked vs lost). If fewer: exits non-zero with a prompt-tuning suggestion.
+- Cost <$0.20.
 
 #### M2-S6-T3 · Turnaround & lost-deal extraction (pure logic, no LLM)
 **Files:** `src/conversion.py` (function `extract_turnarounds`), `tests/test_conversion.py`
@@ -558,7 +569,7 @@ Each M2 task replaces a stubbed stage with the real implementation. After each t
 **Acceptance:**
 ```bash
 uv run pytest tests/test_conversion.py -q   # all green, offline
-uv run python scripts/verify_stage6.py      # ≥8/10 ground-truth matches
+uv run python scripts/verify_stage6.py      # ≥16/20 ground-truth matches
 ```
 
 ### Stage 7 deepening
@@ -568,7 +579,8 @@ uv run python scripts/verify_stage6.py      # ≥8/10 ground-truth matches
 **Effort:** 4h
 **What to build:**
 - Load `labeled_messages.jsonl`. Filter `from_me=False AND step_context="off_script"`.
-- Group by `step_id` (parent step context). Within each group:
+- `step_id` for customer off-script messages = **the last preceding spa message's step_id** in the same chat (parent step context). Assign during load; messages with no preceding spa step → `step_id="unknown"` and routed to `Aggregation.off_script_clusters` (global bucket).
+- Group by `step_id`. Within each group:
   - Embed with `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (loaded once, cached). CPU is fine.
   - HDBSCAN `min_cluster_size=3, metric='cosine'`.
   - Medoid = message with min sum of cosine distances to cluster members.
@@ -593,9 +605,9 @@ uv run python scripts/verify_stage6.py      # ≥8/10 ground-truth matches
 - Input packet to Sonnet:
   - Per-step aggregates (Stage 7).
   - Top 10 positive + top 10 negative templates (by polarity × instance_count × warmth).
-  - Top 20 turnarounds (ranked by conversion_score × clarity-of-winning-reply — needs a simple scoring function; length of winning_reply ≤200 chars is a good proxy).
+  - Top 20 turnarounds ranked by `score = conversion_score × clarity`. `clarity` = `TemplateSentiment.clarity` of the template containing `winning_reply_msg_id` (lookup via `data/spa_message_template_map.json` → `data/template_sentiment.json`). If `winning_reply_msg_id` has no template mapping (rare — very-long or never-repeated replies), fall back to `clarity=3` (neutral).
   - Paired lost deals.
-  - Script inferred_extensions (for §7 "Lacunas no script").
+  - Script extensions loaded from `data/script_extensions.yaml` (for §7 "Lacunas no script").
 - Prompt structure: system sets style (PT-BR, direct, no filler); user message provides the structured JSON blobs with schemas inline.
 - Total context: ≤40k tokens in, ≤6k out → Sonnet call ~$1.50.
 - Post-processing: write the 5 CSVs directly from Python (not the LLM). `turnarounds.csv` columns: `telefone, data, tipo_objecao, mensagem_cliente, resposta_vencedora, confirmacao`. Use `pandas.to_csv(encoding="utf-8", index=False)`.
@@ -618,23 +630,23 @@ uv run python scripts/verify_stage6.py      # ≥8/10 ground-truth matches
 
 ### M3-T1 · Ground-truth collection helper
 **Files:** `scripts/label_ground_truth.py`, `data/ground_truth_outcomes.csv`
-**Effort:** 2h
+**Effort:** 3h
 **What to build:**
-- Interactive CLI: loads `data/conversations.jsonl`, picks 10 chats stratified by length (3 short, 4 medium, 3 long). Prints each chat formatted, prompts user: `[b]ooked / [l]ost / [a]mbiguous / [s]kip / notes:`.
+- Interactive CLI: loads `data/conversations.jsonl`, picks **20** chats stratified by length (6 short, 8 medium, 6 long). Prints each chat formatted, prompts user: `[b]ooked / [l]ost / [a]mbiguous / [s]kip / notes:`.
 - Writes `data/ground_truth_outcomes.csv`: `chat_id, phone, outcome, notes`.
-- **User action required before M2-S6 finishes:** user runs this script, labels 10 chats. Without it, Stage 6 smoke test can't run.
+- **User action required before M2-S6 finishes:** user runs this script, labels 20 chats. Without it, Stage 6 smoke test can't run.
 
-**Acceptance:** User hands over CSV with 10 rows.
+**Acceptance:** User hands over CSV with 20 rows.
 
 ### M3-T2 · Prompt-tuning loop for Stage 6
 **Files:** `prompts/stage6_conversion.md` (iterated), observations in `data/calibration_log.md`
 **Effort:** 2–4h
 **What to do:**
-- Run `scripts/verify_stage6.py` against the 10 ground-truth chats.
-- If ≥8/10 match: ship.
-- If <8/10: inspect mismatches in `data/conversions.jsonl`, adjust prompt (clarify "ambiguous", add negative example for the missed class), re-run. Cap: 3 iterations; if still <8 after 3, escalate to Sonnet for Stage 6 at ~5× cost.
+- Run `scripts/verify_stage6.py` against the 20 ground-truth chats.
+- If ≥16/20 match: ship.
+- If <16/20: inspect mismatches in `data/conversions.jsonl`, adjust prompt (clarify "ambiguous", add negative example for the missed class), re-run. Cap: 3 iterations; if still <16 after 3, escalate to Sonnet for Stage 6 at ~5× cost.
 
-**Verification:** final iteration ≥8/10, notes in `data/calibration_log.md`.
+**Verification:** final iteration ≥16/20, notes in `data/calibration_log.md`.
 
 ### M3-T3 · Full-corpus run
 **Effort:** 1h (mostly wall clock)
@@ -695,7 +707,7 @@ uv run python -m scripts.run_pipeline --budget-usd 10.00 --force         # ~$6-8
 
 | Risk | Mitigation |
 |---|---|
-| Haiku mis-classifies objection types in PT-BR slang (e.g. "tô ruim de grana" for price) | M2-S6 smoke test over 10 ground-truth chats catches systematic errors before the full run. |
+| Haiku mis-classifies objection types in PT-BR slang (e.g. "tô ruim de grana" for price) | M2-S6 smoke test over 20 ground-truth chats catches systematic errors before the full run. |
 | HDBSCAN returns mostly noise (cluster membership ≤20%) | `test_aggregation_counts_match_inputs` surfaces noise ratio; if high, drop `min_cluster_size` to 2 or try `UMAP + HDBSCAN`. |
 | `rapidfuzz` threshold 88 either over-merges ("bom dia" + "boa tarde") or under-merges | M1-T3 smoke prints top 20 templates; eyeball for 10 minutes before committing threshold. Parameterize as `ctx.dedupe_threshold`. |
 | Phone numbers in report raise privacy concern | Leave them plaintext in JSON/CSV (they're the primary key for business verification); the final `output/report.md` should keep them — this is an internal tool for the spa owner, not a public deliverable. If this changes, add a `--anonymize` flag that hashes all phones before Stage 8. |
@@ -729,13 +741,13 @@ uv run python -m scripts.run_pipeline --budget-usd 10.00 --force         # ~$6-8
 | M2-S4-T1 | Stage 4 spa-template labeling | 4h | M1-T3 | $1.00 |
 | M2-S4-T2 | Stage 4 customer batching & tagging | 4h | M2-S4-T1 | $1.50 |
 | M2-S5-T1 | Stage 5 template sentiment | 3h | M1-T3 | $0.40 |
-| M2-S6-T1 | Stage 6 truncation utility | 2h | M1-T2 | $0 |
-| M3-T1 | Ground-truth collection helper | 2h | M1-T2 | $0 |
-| M2-S6-T2 | Stage 6 conversion detection | 5h | M2-S6-T1, M3-T1 | $1.80 |
+| M2-S6-T1 | Stage 6 truncation utility | 2h | M1-T2, M2-S4-T2 | $0 |
+| M3-T1 | Ground-truth collection helper (20 chats) | 3h | M1-T2 | $0 |
+| M2-S6-T2 | Stage 6 conversion detection | 5h | M2-S6-T1, M2-S4-T2, M3-T1 | $1.80 |
 | M2-S6-T3 | Stage 6 turnaround extraction (pure) | 3h | M2-S6-T2 | $0 |
 | M2-S7-T1 | Stage 7 embedding + HDBSCAN | 4h | M2-S4-T2 | $0 |
 | M2-S8-T1 | Stage 8 full report | 5h | M2-S7-T1, M2-S6-T3, M2-S5-T1 | $1.50 |
-| M3-T2 | Prompt-tuning loop for Stage 6 | 2–4h | M2-S6-T2 | $0.50 |
+| M3-T2 | Prompt-tuning loop for Stage 6 (≥16/20) | 2–4h | M2-S6-T2 | $0.50 |
 | M3-T3 | Full-corpus run | 1h | all M2 | $6–8 |
 | M3-T4 | Human review + script v2 draft | 3h | M3-T3 | $0.30 |
 
