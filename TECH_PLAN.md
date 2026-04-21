@@ -52,6 +52,22 @@ Applied after review pass. Supersedes any earlier inline statement that conflict
 
 ---
 
+## Revision v3 — design decisions (2026-04-20)
+
+Applied after user requested Max-subscription support + phone-list testing mode. Supersedes conflicting earlier statements.
+
+1. **LLM auth — dual-client with fallback.** `src/llm.py` holds two long-lived clients: `MaxClient` (via `claude-agent-sdk`, OAuth session from `claude login`) and `ApiClient` (raw `anthropic.Anthropic(api_key=...)`). Single `complete()` dispatcher tries Max path first; on Agent SDK rate-limit / quota-exhausted exception, flips `max_exhausted=True` with reset timestamp and routes subsequent calls to `ApiClient`. Budget guard (`BudgetExceeded`) applies **only to API path** — Max calls are flat-rate, accounted as `cost_usd=0`. Accumulator splits into `{max, api, fallback_events}` for reporting. Supersedes v2 Decision 12's implicit single-path assumption.
+2. **LLM mode CLI flag.** `--llm-mode {max,api,hybrid}` selects dispatcher behavior. Default = `hybrid` when both creds present, else whichever is available. `api` alone = skip Max entirely (bypasses OAuth). `max` alone = no fallback; raises on quota exhaust.
+3. **Config precedence (M0-T2 init):**
+   - Both `ANTHROPIC_OAUTH_TOKEN` (or `claude login` session file) + `ANTHROPIC_API_KEY` present → Max primary, API fallback.
+   - Only OAuth → Max-only mode.
+   - Only API key → API-only mode.
+   - Neither → `ConfigError` at client init.
+4. **Phone-list testing mode.** New CLI flag `--phones-file <path>`: text file with one bare phone per line (e.g. `5511962719203`, no `+`, no spaces). Stage 1 filters by `jid.user IN phones_set` and **bypasses the 20-message threshold** — every matched chat goes to `conversations.jsonl` regardless of length (user intent: full chat of those numbers, even if short). Mutually exclusive with `--chat-limit`.
+5. **Sentinel cache-busting for filter modes.** `data/stageN.done` sentinels gain a `phones_hash: sha256(sorted(phones_set))` field (or `null` if no phones filter). Orchestrator re-runs stage if hash differs from sentinel, even without `--force`. Prevents contamination when swapping between full run, `--chat-limit`, and `--phones-file` modes.
+
+---
+
 ## Build strategy: vertical slice, then deepen
 
 ```
@@ -237,42 +253,68 @@ class Aggregation(BaseModel):
 **Files:** `pyproject.toml`, `uv.lock`, `.gitignore`, `.env.example`, `README.md` (minimal)
 **Effort:** 1–2h
 **What to build:**
-- `uv init --python 3.11` and add deps: `anthropic>=0.40`, `rapidfuzz`, `pyyaml`, `pydantic>=2`, `python-dotenv`, `sentence-transformers`, `hdbscan`, `pandas`, `tqdm`; dev: `pytest`, `pytest-cov`, `ruff`.
+- `uv init --python 3.11` and add deps: `anthropic>=0.40`, `claude-agent-sdk`, `rapidfuzz`, `pyyaml`, `pydantic>=2`, `python-dotenv`, `sentence-transformers`, `hdbscan`, `pandas`, `tqdm`; dev: `pytest`, `pytest-cov`, `ruff`.
 - `.gitignore` includes: `.env`, `data/`, `output/`, `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.venv/`, `*.db-journal`.
-- `.env.example` with `ANTHROPIC_API_KEY=`.
-- Top-level `README.md` with `uv sync && uv run pytest -q && uv run python -m scripts.run_pipeline --chat-limit 5` quickstart.
+- `.env.example` with `ANTHROPIC_API_KEY=` and comment noting that `claude login` (Agent SDK OAuth for Max subscription) is an alternative or complement — see M0-T2.
+- Top-level `README.md` with `uv sync && uv run pytest -q && uv run python -m scripts.run_pipeline --chat-limit 5` quickstart. Note auth setup: either run `claude login` (Max) or set `ANTHROPIC_API_KEY` (paid API), or both for hybrid mode.
 
 **Verification:**
 ```bash
 uv sync && uv run python -c "import anthropic, rapidfuzz, hdbscan, sentence_transformers; print('ok')"
 ```
 
-### M0-T2 · `src/llm.py` — Claude client, retry, budget, token accounting
+### M0-T2 · `src/llm.py` — dual-client dispatcher (Max + API fallback), retry, budget, token accounting
 **Files:** `src/llm.py`, `tests/test_llm.py`
-**Effort:** 3–4h
+**Effort:** 5–6h
 **What to build:**
-- Singleton `ClaudeClient` wrapping `anthropic.Anthropic()`. Reads `ANTHROPIC_API_KEY` via `python-dotenv`.
-- `complete(model: str, messages: list[dict], system: str | None, max_tokens: int, response_format: type[BaseModel] | None) -> BaseModel | str` with:
-  - Retry on `RateLimitError`, `APIConnectionError`, `APITimeoutError` — exponential backoff, 5 attempts max.
-  - Token accounting: accumulates `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` per call in a module-level `Accumulator`. Cache tokens **tracked for reporting only** — no `cache_control` breakpoints added to prompts.
-  - Cost estimation: hardcoded price table keyed on aliased model IDs `claude-haiku-4-5` and `claude-sonnet-4-6` (no dated suffix); raises `BudgetExceeded` if running total + projected-call cost > `budget_usd` (budget pulled from env var `LLM_BUDGET_USD`, default $10).
-  - If `response_format` is a Pydantic model, uses structured-output tool-use pattern: describe the schema as an Anthropic `tool`, force `tool_choice`, parse the tool-call result into the model. Raises `SchemaError` on parse failure after retries.
-- Expose `get_usage_report() -> dict` and `reset_usage()`.
+- Two adapter classes behind a single dispatcher:
+  - `MaxClient` — wraps `claude-agent-sdk`. Auth via OAuth session (from `claude login`). No per-token cost.
+  - `ApiClient` — wraps `anthropic.Anthropic(api_key=...)`. Reads `ANTHROPIC_API_KEY` via `python-dotenv`. Per-token cost applies.
+  - Both expose the same internal `_complete(model, messages, system, max_tokens, response_format) -> (BaseModel|str, UsageDelta)` signature.
+- Singleton `ClaudeClient` dispatcher:
+  - Init reads `llm_mode` (`max` | `api` | `hybrid`) from `ctx` (CLI flag, default `hybrid`). Resolves available creds per Revision v3 Decision 3. Raises `ConfigError` if required creds missing for chosen mode.
+  - `complete(model, messages, system, max_tokens, response_format) -> BaseModel | str`:
+    - `hybrid` mode: try `MaxClient._complete` first. On `RateLimitError` / quota-exhausted from Agent SDK → set `max_exhausted=True` with `reset_ts` (parsed from exception if present, else now + 1h), route this call to `ApiClient._complete`. Further calls go straight to API until `time.time() > reset_ts` (then retry Max).
+    - `max` mode: no fallback; rate-limit propagates up.
+    - `api` mode: skip Max entirely.
+  - Retry on `RateLimitError`, `APIConnectionError`, `APITimeoutError` — exponential backoff, 5 attempts max per path. Hybrid-mode Max rate-limit after first retry triggers fallback (don't burn all 5 attempts on Max).
+  - Token accounting: module-level `Accumulator` with split buckets:
+    ```python
+    {
+      "max": {"calls": int, "input_tokens": int, "output_tokens": int,
+              "cache_read_input_tokens": int, "cache_creation_input_tokens": int},
+      "api": {"calls": int, "input_tokens": int, "output_tokens": int,
+              "cache_read_input_tokens": int, "cache_creation_input_tokens": int,
+              "cost_usd": float},
+      "fallback_events": [{"ts": float, "reason": str, "model": str}, ...]
+    }
+    ```
+    Max-path `cost_usd` omitted (flat subscription, reported as `$0`).
+  - Cost estimation (API path only): hardcoded price table keyed on aliased model IDs `claude-haiku-4-5` and `claude-sonnet-4-6`. Raises `BudgetExceeded` if `api.cost_usd + projected_call_cost > budget_usd` (env `LLM_BUDGET_USD`, default $10). Max-mode runs have no budget guard.
+  - Structured output (both paths): if `response_format` is a Pydantic model, use tool-use pattern — describe schema as an Anthropic `tool`, force `tool_choice`, parse result. Raises `SchemaError` on parse failure after retries. Both SDKs support identical tool-use payloads.
+  - Prompt caching: **tracked, not enforced** per v2 Decision 8. No `cache_control` breakpoints. Agent SDK applies caching automatically; `cache_read_input_tokens` / `cache_creation_input_tokens` land in the `max` bucket.
+- Expose `get_usage_report() -> dict` (full Accumulator) and `reset_usage()`.
 
-**Tests (`tests/test_llm.py`, pytest with respx/httpx mocks or `monkeypatch`):**
-- `test_retry_on_rate_limit` — mock 429, 429, 200 → third succeeds, 2 retries logged.
-- `test_token_accounting` — 3 canned responses with known token counts → total matches sum.
-- `test_budget_abort` — `budget_usd=0.001`, attempt 5k-token call → raises `BudgetExceeded` before hitting API.
-- `test_structured_output_schema` — `response_format=Foo` with a malformed tool response → raises `SchemaError` after retries.
+**Tests (`tests/test_llm.py`, pytest with `monkeypatch` — all offline):**
+- `test_retry_on_rate_limit_api_path` — API mode, mock 429, 429, 200 → third succeeds, 2 retries logged under `api`.
+- `test_hybrid_fallback_on_max_rate_limit` — Max mock raises rate-limit → API mock called once → result returned; `fallback_events` has 1 entry; subsequent calls in same run go straight to API.
+- `test_hybrid_resume_max_after_reset` — after `reset_ts` passes, next call attempts Max again.
+- `test_max_mode_no_fallback_propagates` — `llm_mode=max`, Max raises rate-limit → exception propagates, API mock never called.
+- `test_api_mode_skips_max` — `llm_mode=api`, Max mock never initialized/called.
+- `test_token_accounting_split_buckets` — 2 Max calls + 1 API call with known token counts → `max` and `api` buckets match.
+- `test_budget_guard_api_path_only` — 1000 Max calls (free) + API call that would exceed → `BudgetExceeded` raised on API attempt only; Max calls never trigger guard.
+- `test_budget_abort_pre_call` — `budget_usd=0.001`, API mode, 5k-token call → `BudgetExceeded` before request sent.
+- `test_structured_output_schema_both_paths` — `response_format=Foo` with malformed tool response on Max → fallback to API → API also malformed → `SchemaError` raised.
+- `test_config_error_no_creds` — neither OAuth session nor API key present → `ConfigError` at init.
 
-**Acceptance:** `uv run pytest tests/test_llm.py -q` green; `test_llm.py` runs offline (no API calls).
+**Acceptance:** `uv run pytest tests/test_llm.py -q` green; runs offline (no API calls, no OAuth check).
 
 ### M0-T3 · `src/schemas.py` + `src/context.py`
 **Files:** `src/schemas.py`, `src/context.py`
 **Effort:** 2h
 **What to build:**
 - All Pydantic models from the "Shared schemas" section above.
-- `Context` dataclass: `db_path: Path`, `script_path: Path`, `data_dir: Path`, `output_dir: Path`, `prompts_dir: Path`, `chat_limit: int | None`, `budget_usd: float`, `force: bool`, `dry_run: bool`, `client: ClaudeClient`. A `Context.from_args(argv)` classmethod for the orchestrator.
+- `Context` dataclass: `db_path: Path`, `script_path: Path`, `data_dir: Path`, `output_dir: Path`, `prompts_dir: Path`, `chat_limit: int | None`, `phones_filter: frozenset[str] | None`, `phones_hash: str | None` (sha256 of sorted phones, or `None`), `llm_mode: Literal["max","api","hybrid"]`, `budget_usd: float`, `force: bool`, `dry_run: bool`, `client: ClaudeClient`. `Context.from_args(argv)` classmethod for the orchestrator handles CLI parsing, phone-file loading, and mutual-exclusion enforcement between `--chat-limit` and `--phones-file`.
 
 **Verification:**
 ```bash
@@ -290,19 +332,31 @@ Goal: `uv run python -m scripts.run_pipeline --chat-limit 5 --budget-usd 1.00` c
 **Files:** `scripts/run_pipeline.py`, `tests/test_pipeline.py`
 **Effort:** 3h
 **What to build:**
-- CLI: `--stage N`, `--from N --to M`, `--chat-limit N`, `--budget-usd X`, `--force`, `--dry-run`.
-- Builds `Context`, imports `src.{load,dedupe,script_index,label,sentiment,conversion,cluster,report}` — each exposes `run(ctx: Context) -> StageResult` where `StageResult = {stage: int, outputs: list[Path], llm_usd: float, elapsed_s: float}`.
-- Resume logic: checks `data/stageN.done` sentinels unless `--force`. Sentinel content: `{"ts": ..., "git_sha": ..., "module_version": "..."}`.
+- CLI flags:
+  - `--stage N`, `--from N --to M`
+  - `--chat-limit N` (mutually exclusive with `--phones-file`)
+  - `--phones-file PATH` (mutually exclusive with `--chat-limit`) — text file, one bare phone per line, blank lines and `#`-comments ignored
+  - `--llm-mode {max,api,hybrid}` (default: `hybrid` if both creds available, else auto-detect)
+  - `--budget-usd X` (API path only)
+  - `--force`, `--dry-run`
+- Loads phones: `Context.from_args` reads the file, strips/validates each line against `^\d{10,15}$`, stores as `frozenset[str]`, computes `phones_hash = sha256(",".join(sorted(phones))).hexdigest()[:16]`.
+- Builds `Context`, imports `src.{load,dedupe,script_index,label,sentiment,conversion,cluster,report}` — each exposes `run(ctx: Context) -> StageResult` where `StageResult = {stage: int, outputs: list[Path], llm_usd_max: float, llm_usd_api: float, elapsed_s: float}`.
+- Resume logic: checks `data/stageN.done` sentinels unless `--force`. Sentinel content: `{"ts": ..., "git_sha": ..., "module_version": "...", "chat_limit": int|null, "phones_hash": str|null, "llm_mode": "..."}`. Stage re-runs if `phones_hash` or `chat_limit` in sentinel differs from current `ctx` — prevents contamination across filter modes.
 - Fails loudly if a stage's prerequisite file (previous stage's output) is missing: `"Stage N requires data/conversations.jsonl from Stage 1. Run: python -m scripts.run_pipeline --stage 1"`.
-- After each stage, prints `[stage N] elapsed=12.3s cost=$0.04 total=$0.21 budget=$1.00`.
-- Final summary: stages run, total time, total cost, list of output files.
+- After each stage, prints `[stage N] elapsed=12.3s max=(120 calls, 45k in / 12k out) api=$0.04 total_api=$0.21 budget=$1.00`.
+- Final summary: stages run, total time, `get_usage_report()` output (both buckets + fallback events), list of output files.
 
 **Tests (pytest):**
-- `test_stage_sentinels_written` — run stage 1 on tiny_db → `data/stage1.done` exists with valid JSON.
-- `test_skip_completed_stages` — sentinel present → stage `run` mock not called.
+- `test_stage_sentinels_written` — run stage 1 on tiny_db → `data/stage1.done` exists with valid JSON including `phones_hash` + `chat_limit`.
+- `test_skip_completed_stages` — sentinel present with matching hash → stage `run` mock not called.
 - `test_force_flag_reruns` — `--force` calls mock despite sentinel.
+- `test_sentinel_invalidated_by_phones_hash_change` — sentinel has `phones_hash=A`, ctx has `phones_hash=B` → stage re-runs without `--force`.
+- `test_sentinel_invalidated_by_chat_limit_change` — sentinel has `chat_limit=5`, ctx has `chat_limit=null` → stage re-runs.
 - `test_missing_prior_output_fails_loudly` — `--stage 2` without stage 1 output → `SystemExit` with error mentioning "Stage 1".
 - `test_chat_limit_propagates` — mock stage 1 captures `ctx.chat_limit=5`.
+- `test_phones_file_loaded` — temp file with 3 valid + 1 invalid + 1 comment line → `ctx.phones_filter` has 3 entries; `phones_hash` deterministic across runs.
+- `test_chat_limit_phones_file_mutex` — both flags set → `SystemExit` with error mentioning "mutually exclusive".
+- `test_llm_mode_propagates` — `--llm-mode=api` → `ctx.llm_mode=="api"` → `ClaudeClient` init skips Max.
 - `test_budget_abort_stops_pipeline` — mock stage 2 raises `BudgetExceeded` → stage 3 mock not called.
 
 **Acceptance:** `uv run python -m scripts.run_pipeline --help` prints usage. Tests green.
@@ -313,10 +367,12 @@ Goal: `uv run python -m scripts.run_pipeline --chat-limit 5 --budget-usd 1.00` c
 **What to build:**
 - `run(ctx)`:
   1. Connect to `ctx.db_path` (read-only).
-  2. SQL: `SELECT m.*, c.jid_row_id, c.group_type, j.user, j.raw_string FROM message m JOIN chat c ON m.chat_row_id=c._id JOIN jid j ON c.jid_row_id=j._id WHERE m.message_type=0 AND m.text_data IS NOT NULL AND c.group_type=0 ORDER BY c._id, m.timestamp`. (`group_type=0` → 1-to-1 chats only; no group chats.)
-  3. Group by `chat_row_id`; for each group, produce `Conversation` with cleaned text (strip URLs via `re.sub(r"https?://\S+", "", t)`, collapse whitespace, preserve `text_raw`).
-  4. Split: ≥20 messages → `data/conversations.jsonl`; <20 → `data/conversations_short.jsonl`.
-  5. If `ctx.chat_limit` set, truncate the long list to first N (by chat_id asc, for determinism).
+  2. Base SQL: `SELECT m.*, c.jid_row_id, c.group_type, j.user, j.raw_string FROM message m JOIN chat c ON m.chat_row_id=c._id JOIN jid j ON c.jid_row_id=j._id WHERE m.message_type=0 AND m.text_data IS NOT NULL AND c.group_type=0 ORDER BY c._id, m.timestamp`. (`group_type=0` → 1-to-1 chats only; no group chats.)
+  3. **Phone filter (testing mode):** if `ctx.phones_filter` is not None, append `AND j.user IN (?, ?, ...)` with parameter binding (no string interpolation — SQL injection guard). When filter active, **bypass the 20-message threshold** entirely — every matched chat (short or long) goes to `data/conversations.jsonl`; `conversations_short.jsonl` is not written.
+  4. Group by `chat_row_id`; for each group, produce `Conversation` with cleaned text (strip URLs via `re.sub(r"https?://\S+", "", t)`, collapse whitespace, preserve `text_raw`).
+  5. Normal mode (no phone filter): split ≥20 messages → `data/conversations.jsonl`; <20 → `data/conversations_short.jsonl`.
+  6. If `ctx.chat_limit` set (and no phone filter — mutex enforced at CLI layer), truncate the long list to first N (by chat_id asc, for determinism).
+  7. If `ctx.phones_filter` set but some phones were not found in DB, log a warning listing missing phones; do not fail.
 - `tools/build_tiny_db.py` creates `tests/fixtures/tiny.db` with exact `msgstore.db` schema (run `sqlite3 msgstore.db ".schema message chat jid"` during build to verify schema parity) and inserts 3 chats: one 25-msg converting chat, one 22-msg lost chat, one 5-msg stub to test threshold.
 
 **Pytest (`tests/test_load.py`, offline):**
@@ -327,6 +383,10 @@ Goal: `uv run python -m scripts.run_pipeline --chat-limit 5 --budget-usd 1.00` c
 - `test_load_strips_urls_and_whitespace` — `"hi https://x.com\n\n hi"` → `"hi  hi"` (or single-space). `text_raw` preserves original.
 - `test_load_extracts_phone` — `jid.user="5511962719203"` → `Conversation.phone="5511962719203"`.
 - `test_chat_limit` — 3 chats, `chat_limit=2` → jsonl has 2 entries.
+- `test_phones_filter_keeps_only_matched` — tiny_db has 3 chats with phones A/B/C; `phones_filter={A,C}` → jsonl has 2 entries, chat B excluded.
+- `test_phones_filter_bypasses_min_messages` — 5-msg stub chat whose phone is in filter → lands in `conversations.jsonl` (not short file), short file not written.
+- `test_phones_filter_warns_on_missing` — filter contains phone not in DB → warning logged, run succeeds.
+- `test_phones_filter_sql_injection_safe` — phone string `"1' OR 1=1 --"` → parameter-bound, no rows match, no SQL error.
 
 **Smoke (`scripts/verify_stage1.py`):**
 - Runs `load.run(ctx)` against the real `msgstore.db` with no chat_limit.
@@ -338,6 +398,11 @@ Goal: `uv run python -m scripts.run_pipeline --chat-limit 5 --budget-usd 1.00` c
 uv run pytest tests/test_load.py -q                          # green
 uv run python scripts/verify_stage1.py                       # prints "387 chats, N messages, OK"
 uv run python -m scripts.run_pipeline --stage 1 --chat-limit 5  # writes data/conversations.jsonl with 5 entries
+
+# Testing mode — phone list
+echo -e "5511962719203\n5511987654321" > /tmp/phones.txt
+uv run python -m scripts.run_pipeline --stage 1 --phones-file /tmp/phones.txt
+# Writes data/conversations.jsonl with matched chats only (any length)
 ```
 
 ### M1-T3 · Stage 2 stub → real (dedupe spa messages)
@@ -728,7 +793,7 @@ uv run python -m scripts.run_pipeline --budget-usd 10.00 --force         # ~$6-8
 | ID | Title | Effort | Prereqs | LLM cost |
 |---|---|---|---|---|
 | M0-T1 | Bootstrap project (uv, pyproject, gitignore, .env) | 1–2h | — | $0 |
-| M0-T2 | `src/llm.py` — client, retry, budget, accounting | 3–4h | M0-T1 | $0 |
+| M0-T2 | `src/llm.py` — dual-client (Max+API), fallback, retry, budget | 5–6h | M0-T1 | $0 |
 | M0-T3 | `src/schemas.py` + `src/context.py` | 2h | M0-T1 | $0 |
 | M1-T1 | Orchestrator skeleton `scripts/run_pipeline.py` | 3h | M0-T3 | $0 |
 | M1-T2 | Stage 1: load DB → conversations.jsonl | 4h | M1-T1 | $0 |
@@ -751,6 +816,6 @@ uv run python -m scripts.run_pipeline --budget-usd 10.00 --force         # ~$6-8
 | M3-T3 | Full-corpus run | 1h | all M2 | $6–8 |
 | M3-T4 | Human review + script v2 draft | 3h | M3-T3 | $0.30 |
 
-**Total effort:** ~70–85 dev-hours (~2 working weeks for one developer).
+**Total effort:** ~72–87 dev-hours (~2 working weeks for one developer). (+2h for dual-client LLM auth.)
 **Total LLM spend projection:** $8–10 including calibration iterations.
 **First stakeholder-readable artifact:** end of day 1 (M1 complete).
