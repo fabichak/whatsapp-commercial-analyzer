@@ -18,7 +18,7 @@ Check off each task as it is completed. Keep this file in sync with the task bre
 | [x] | M1-T5 | Stages 4–7 stubs (pass-through) | 2h | M1-T2, M1-T4 | $0 |
 | [x] | M1-T6 | Stage 8 minimal hollow report | 3h | M1-T5 | $0.30 |
 | — | **M1 COMPLETE** | **End-to-end on 5 chats, <$0.50** | | | |
-| [ ] | M2-S3-T1 | Stage 3 LLM script expansion | 4h | M1-T4 | $0.50 |
+| [x] | M2-S3-T1 | Stage 3 LLM script expansion | 4h | M1-T4 | $0.50 |
 | [ ] | M2-S4-T1 | Stage 4 spa-template labeling | 4h | M1-T3 | $1.00 |
 | [ ] | M2-S4-T2 | Stage 4 customer batching & tagging | 4h | M2-S4-T1 | $1.50 |
 | [ ] | M2-S5-T1 | Stage 5 template sentiment | 3h | M1-T3 | $0.40 |
@@ -51,7 +51,7 @@ Record the output of each task's verification command here, one short line per t
 | M1-T4 | — | — |
 | M1-T5 | — | — |
 | M1-T6 | — | — |
-| M2-S3-T1 | — | — |
+| M2-S3-T1 | 2026-04-21 | `pytest tests/test_script_index.py -q` → 12 passed. `verify_stage3.py` via Max ($0). Orchestrator `--stage 3 --force`: Max schema-failed on first attempt, fell back to API ($0.088, 13.8k in / 3.1k out). `data/script_extensions.yaml` = 10 KB, 4 pitch steps, 9 objection_replies, 6 inconsistencies. Sentinel lists both outputs. |
 | M2-S4-T1 | — | — |
 | M2-S4-T2 | — | — |
 | M2-S5-T1 | — | — |
