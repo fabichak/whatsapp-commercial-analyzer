@@ -12,7 +12,7 @@ Check off each task as it is completed. Keep this file in sync with the task bre
 | [x] | M0-T2 | `src/llm.py` — client, retry, budget, accounting | 3–4h | M0-T1 | $0 |
 | [x] | M0-T3 | `src/schemas.py` + `src/context.py` | 2h | M0-T1 | $0 |
 | [x] | M1-T1 | Orchestrator skeleton `scripts/run_pipeline.py` | 3h | M0-T3 | $0 |
-| [ ] | M1-T2 | Stage 1: load DB → conversations.jsonl | 4h | M1-T1 | $0 |
+| [x] | M1-T2 | Stage 1: load DB → conversations.jsonl | 4h | M1-T1 | $0 |
 | [ ] | M1-T3 | Stage 2: rapidfuzz dedupe | 3h | M1-T2 | $0 |
 | [ ] | M1-T4 | Stage 3: hand-curated `script.yaml` | 3h | M0-T3 | $0 |
 | [ ] | M1-T5 | Stages 4–7 stubs (pass-through) | 2h | M1-T2, M1-T4 | $0 |
@@ -46,7 +46,7 @@ Record the output of each task's verification command here, one short line per t
 | M0-T2 | — | — |
 | M0-T3 | — | — |
 | M1-T1 | 2026-04-20 | `pytest tests/test_pipeline.py -q` → 11 passed. `python -m scripts.run_pipeline --help` prints usage. |
-| M1-T2 | — | — |
+| M1-T2 | 2026-04-20 | `pytest tests/test_load.py -q` → 12 passed. Smoke: 334 chats, 14965 msgs (spec est 387 — DB uses WhatsApp LIDs, not E.164). `--chat-limit 5` → 5 long + 1341 short. `--phones-file` (2 LIDs) → 2 long, short file not written. |
 | M1-T3 | — | — |
 | M1-T4 | — | — |
 | M1-T5 | — | — |
