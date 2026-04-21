@@ -22,7 +22,7 @@ Check off each task as it is completed. Keep this file in sync with the task bre
 | [x] | M2-S4-T1 | Stage 4 spa-template labeling | 4h | M1-T3 | $1.00 |
 | [x] | M2-S4-T2 | Stage 4 customer batching & tagging | 4h | M2-S4-T1 | $1.50 |
 | [x] | M2-S5-T1 | Stage 5 template sentiment | 3h | M1-T3 | $0.40 |
-| [ ] | M2-S6-T1 | Stage 6 truncation utility | 2h | M1-T2, M2-S4-T2 | $0 |
+| [x] | M2-S6-T1 | Stage 6 truncation utility | 2h | M1-T2, M2-S4-T2 | $0 |
 | [ ] | M3-T1 | Ground-truth collection helper (20 chats) | 3h | M1-T2 | $0 |
 | [ ] | M2-S6-T2 | Stage 6 conversion detection | 5h | M2-S6-T1, M2-S4-T2, M3-T1 | $1.80 |
 | [ ] | M2-S6-T3 | Stage 6 turnaround extraction (pure) | 3h | M2-S6-T2 | $0 |
