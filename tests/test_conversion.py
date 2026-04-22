@@ -14,9 +14,10 @@ from src.conversion import (
     ConversionDetection,
     count_tokens,
     detect_conversions,
+    extract_turnarounds,
     truncate_for_llm,
 )
-from src.schemas import Conversation, Message
+from src.schemas import Conversation, ConversationConversion, Message
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = REPO_ROOT / "prompts"
@@ -315,3 +316,112 @@ def test_validation_rejects_bad_score(tmp_path):
     ctx.client = FakeClient([bad])
     with pytest.raises(ValueError, match="conversion_score"):
         detect_conversions(ctx)
+
+
+# ---------------- M2-S6-T3 · turnaround & lost-deal extraction ----------------
+
+
+def _mk_convo_for_turn(chat_id=1, phone="+55011999", ts_ms_base=1_700_000_000_000):
+    # 8 msgs: cli=0/2/4/6, spa=1/3/5/7
+    msgs = [
+        Message(
+            msg_id=200 + i,
+            ts_ms=ts_ms_base + i * 1000,
+            from_me=(i % 2 == 1),
+            text=[
+                "oi quanto custa?",
+                "oi, o preco e 150",
+                "caro demais",  # idx 2 — objection
+                "posso fazer 120 pra voce hoje",  # idx 3 — resolution
+                "ok perfeito, pode agendar",  # idx 4 — confirmation
+                "agendado pra amanha as 10",
+                "obrigada",
+                "de nada",
+            ][i],
+            text_raw="",
+        )
+        for i in range(8)
+    ]
+    return Conversation(chat_id=chat_id, phone=phone, messages=msgs)
+
+
+def _mk_cc(
+    chat_id=1, phone="+55011999", score=3, outcome="booked",
+    obj_idx=2, obj_type="price", res_idx=3,
+):
+    return ConversationConversion(
+        chat_id=chat_id,
+        phone=phone,
+        conversion_score=score,
+        conversion_evidence="evid",
+        first_objection_idx=obj_idx,
+        first_objection_type=obj_type,
+        resolution_idx=res_idx,
+        winning_reply_excerpt=None,
+        final_outcome=outcome,
+    )
+
+
+def test_turnaround_detected():
+    convo = _mk_convo_for_turn()
+    cc = _mk_cc()
+    turns, lost = extract_turnarounds([cc], [convo])
+    assert len(turns) == 1
+    t = turns[0]
+    assert t.chat_id == 1
+    assert t.objection_type == "price"
+    assert t.customer_message == "caro demais"
+    assert t.winning_reply == "posso fazer 120 pra voce hoje"
+    assert t.winning_reply_msg_id == 203
+    assert "ok perfeito" in t.confirmation
+    assert lost == []
+
+
+def test_no_turnaround_when_no_objection():
+    convo = _mk_convo_for_turn()
+    cc = _mk_cc(obj_type=None, obj_idx=None)
+    turns, lost = extract_turnarounds([cc], [convo])
+    assert turns == []
+    assert lost == []
+
+
+def test_lost_deal_detected():
+    convo = _mk_convo_for_turn(chat_id=5)
+    cc = _mk_cc(chat_id=5, score=0, outcome="lost", res_idx=None)
+    turns, lost = extract_turnarounds([cc], [convo])
+    assert turns == []
+    assert len(lost) == 1
+    ld = lost[0]
+    assert ld.chat_id == 5
+    assert ld.objection_type == "price"
+    assert ld.customer_message == "caro demais"
+
+
+def test_lost_deal_pairing():
+    convos = []
+    ccs = []
+    # 5 turnarounds price
+    for i in range(5):
+        cid = 100 + i
+        convos.append(_mk_convo_for_turn(chat_id=cid, ts_ms_base=1_700_000_000_000 + i * 86_400_000))
+        ccs.append(_mk_cc(chat_id=cid, score=3, outcome="booked", obj_type="price"))
+    # 3 lost deals price (earlier dates)
+    for i in range(3):
+        cid = 200 + i
+        convos.append(_mk_convo_for_turn(chat_id=cid, ts_ms_base=1_600_000_000_000 + i * 86_400_000))
+        ccs.append(_mk_cc(chat_id=cid, score=0, outcome="lost", obj_type="price", res_idx=None))
+
+    turns, lost = extract_turnarounds(ccs, convos)
+    assert len(turns) == 5
+    assert len(lost) == 3
+    for t in turns:
+        assert 1 <= len(t.paired_lost_deals) <= 2
+        for pid in t.paired_lost_deals:
+            assert 200 <= pid < 203
+
+
+def test_phone_number_attached_turnaround():
+    convo = _mk_convo_for_turn(phone="+5511987654321")
+    cc = _mk_cc()
+    turns, _ = extract_turnarounds([cc], [convo])
+    assert turns[0].phone == "+5511987654321"

@@ -106,6 +106,16 @@ class Turnaround(BaseModel):
     paired_lost_deals: list[int]
 
 
+class LostDeal(BaseModel):
+    chat_id: int
+    phone: str
+    date: str
+    objection_type: str
+    customer_message: str
+    winning_reply: str
+    confirmation: str
+
+
 class OffScriptCluster(BaseModel):
     step_id: str
     medoid_text: str

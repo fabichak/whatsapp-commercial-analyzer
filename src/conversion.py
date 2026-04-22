@@ -21,8 +21,17 @@ import tiktoken
 from pydantic import BaseModel
 from tqdm import tqdm
 
+from datetime import datetime, timezone
+
 from src.context import Context
-from src.schemas import Conversation, ConversationConversion, Message, ObjectionId
+from src.schemas import (
+    Conversation,
+    ConversationConversion,
+    LostDeal,
+    Message,
+    ObjectionId,
+    Turnaround,
+)
 
 log = logging.getLogger(__name__)
 
@@ -357,6 +366,111 @@ def detect_conversions(ctx: Context) -> list[ConversationConversion]:
     return ordered
 
 
+CONFIRMATION_PHRASES = (
+    "ok", "okay", "perfeito", "confirm", "fechad", "combinad",
+    "obrigad", "agendad", "até ", "ate ", "pode ser", "valeu",
+    "maravilh", "beleza", "show", "blz", "👍",
+)
+
+
+def _date_of(msg: Message) -> str:
+    return datetime.fromtimestamp(msg.ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def _find_confirmation(convo: Conversation, start_idx: int) -> str:
+    for m in convo.messages[start_idx + 1:]:
+        if m.from_me:
+            continue
+        low = m.text.lower()
+        if any(p in low for p in CONFIRMATION_PHRASES):
+            return m.text
+    return ""
+
+
+def extract_turnarounds(
+    conversions: list[ConversationConversion],
+    conversations: list[Conversation],
+) -> tuple[list[Turnaround], list[LostDeal]]:
+    """Pure logic — no LLM. See TECH_PLAN §M2-S6-T3."""
+    by_id: dict[int, Conversation] = {c.chat_id: c for c in conversations}
+
+    turnarounds: list[Turnaround] = []
+    lost_deals: list[LostDeal] = []
+
+    for cc in conversions:
+        convo = by_id.get(cc.chat_id)
+        if convo is None or cc.first_objection_type is None:
+            continue
+        if cc.first_objection_idx is None:
+            continue
+        n = len(convo.messages)
+        if not (0 <= cc.first_objection_idx < n):
+            continue
+        obj_msg = convo.messages[cc.first_objection_idx]
+        date = _date_of(obj_msg)
+
+        is_turn = (
+            cc.conversion_score >= 2
+            and cc.resolution_idx is not None
+            and cc.resolution_idx > cc.first_objection_idx
+            and cc.resolution_idx < n
+            and cc.final_outcome == "booked"
+        )
+        if is_turn:
+            res_msg = convo.messages[cc.resolution_idx]
+            turnarounds.append(Turnaround(
+                chat_id=cc.chat_id,
+                phone=convo.phone,
+                date=date,
+                objection_type=cc.first_objection_type,
+                customer_message=obj_msg.text,
+                winning_reply=res_msg.text,
+                winning_reply_msg_id=res_msg.msg_id,
+                confirmation=_find_confirmation(convo, cc.resolution_idx),
+                paired_lost_deals=[],
+            ))
+            continue
+
+        if cc.conversion_score <= 1 and cc.final_outcome == "lost":
+            # Last spa reply after objection → surfaces what failed.
+            losing_reply = ""
+            for m in reversed(convo.messages[cc.first_objection_idx + 1:]):
+                if m.from_me:
+                    losing_reply = m.text
+                    break
+            lost_deals.append(LostDeal(
+                chat_id=cc.chat_id,
+                phone=convo.phone,
+                date=date,
+                objection_type=cc.first_objection_type,
+                customer_message=obj_msg.text,
+                winning_reply=losing_reply,
+                confirmation="",
+            ))
+
+    # Pair 1–2 earliest-dated lost deals of same objection_type per turnaround.
+    lost_by_type: dict[str, list[LostDeal]] = {}
+    for ld in lost_deals:
+        lost_by_type.setdefault(ld.objection_type, []).append(ld)
+    for lst in lost_by_type.values():
+        lst.sort(key=lambda x: x.date)
+
+    cursor: dict[str, int] = {}
+    for t in turnarounds:
+        pool = lost_by_type.get(t.objection_type, [])
+        if not pool:
+            continue
+        start = cursor.get(t.objection_type, 0)
+        # Rotate through pool so multiple turnarounds spread across lost deals.
+        take = pool[start:start + 2] if start < len(pool) else pool[:2]
+        if len(take) < 2 and len(pool) >= 2 and start > 0:
+            take = (take + pool[: 2 - len(take)])
+        t.paired_lost_deals = [ld.chat_id for ld in take[:2]]
+        cursor[t.objection_type] = start + len(take)
+
+    return turnarounds, lost_deals
+
+
 def run(ctx: Context) -> dict:
     t0 = time.time()
     conversions_path = ctx.data_dir / CONVERSIONS_RELPATH
@@ -364,13 +478,25 @@ def run(ctx: Context) -> dict:
     lost_path = ctx.data_dir / "lost_deals.json"
     ctx.data_dir.mkdir(parents=True, exist_ok=True)
 
-    detect_conversions(ctx)
+    conversions = detect_conversions(ctx)
 
-    # M2-S6-T3 populates these; stub until then.
-    if not turnarounds_path.exists():
-        turnarounds_path.write_text("[]", encoding="utf-8")
-    if not lost_path.exists():
-        lost_path.write_text("[]", encoding="utf-8")
+    convos: list[Conversation] = []
+    convos_path = ctx.data_dir / CONVERSATIONS_RELPATH
+    with convos_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                convos.append(Conversation.model_validate_json(line))
+
+    turnarounds, lost_deals = extract_turnarounds(conversions, convos)
+    turnarounds_path.write_text(
+        json.dumps([t.model_dump() for t in turnarounds], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    lost_path.write_text(
+        json.dumps([l.model_dump() for l in lost_deals], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
     api_cost = 0.0
     if ctx.client is not None:
