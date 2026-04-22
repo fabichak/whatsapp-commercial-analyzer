@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -314,6 +315,16 @@ class MaxClient:
         if system:
             cmd.extend(["--system-prompt", system])
 
+        debug = os.environ.get("LLM_DEBUG_STDOUT", "") == "1"
+        if debug:
+            prompt_preview = prompt if len(prompt) < 4000 else prompt[:2000] + f"\n...[{len(prompt) - 4000} chars elided]...\n" + prompt[-2000:]
+            sys.stdout.write(
+                f"\n--- LLM CALL (oneshot) model={model} max_tokens={max_tokens} "
+                f"prompt_chars={len(prompt)} system_chars={len(system)} ---\n"
+                f"PROMPT:\n{prompt_preview}\n--- /PROMPT ---\n"
+            )
+            sys.stdout.flush()
+
         try:
             proc = subprocess.run(
                 cmd,
@@ -337,6 +348,13 @@ class MaxClient:
             raise SchemaError(f"CLI stdout not JSON: {proc.stdout[:500]}") from e
 
         text_out = envelope.get("result") or ""
+        if debug:
+            out_preview = text_out if len(text_out) < 4000 else text_out[:2000] + f"\n...[{len(text_out) - 4000} chars elided]...\n" + text_out[-2000:]
+            sys.stdout.write(
+                f"--- LLM RESPONSE model={model} chars={len(text_out)} "
+                f"usage={envelope.get('usage')} ---\n{out_preview}\n--- /RESPONSE ---\n\n"
+            )
+            sys.stdout.flush()
         u = envelope.get("usage") or {}
         delta = UsageDelta(
             input_tokens=int(u.get("input_tokens", 0) or 0),

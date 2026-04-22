@@ -10,11 +10,20 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
+
+# WSL2: SDK stream-json path deadlocks on some inputs. Oneshot invokes
+# bundled CLI with `-p --output-format json` — subproc runs to completion.
+os.environ.setdefault("CLAUDE_MAX_ONESHOT", "1")
+# Sweep stray `claude` CLI subprocs from prior crashed runs so Stage 3
+# doesn't hang on a stuck pipe. Safe: MaxClient._protected_pids spares
+# this process tree (ancestor Claude Code session + sibling workers).
+os.environ.setdefault("CLAUDE_MAX_KILL_OTHERS", "1")
 
 from src.context import Context
 from src.exceptions import BudgetExceeded
@@ -169,10 +178,11 @@ def run_pipeline(ctx: Context, stages: list[int]) -> dict:
         check_prereqs(ctx, stage)
         mod = load_stage_module(stage)
         start = time.time()
+        print(f"\n{'=' * 60}\n>>> STAGE {stage} START ({STAGE_MODULES[stage]})\n{'=' * 60}")
         try:
             result = mod.run(ctx)
         except BudgetExceeded as e:
-            print(f"[stage {stage}] BUDGET ABORT: {e}", file=sys.stderr)
+            print(f"<<< STAGE {stage} ABORT (budget): {e}", file=sys.stderr)
             raise
         if not isinstance(result, dict):
             result = {"stage": stage, "outputs": []}
@@ -184,6 +194,7 @@ def run_pipeline(ctx: Context, stages: list[int]) -> dict:
 
         total_api += float(result["llm_usd_api"])
         print(_fmt_usage_line(stage, result, total_api, ctx.budget_usd))
+        print(f"<<< STAGE {stage} END\n")
         write_sentinel(ctx, stage, result)
         summary.append(result)
 
@@ -194,8 +205,24 @@ def run_pipeline(ctx: Context, stages: list[int]) -> dict:
     return {"stages": summary, "elapsed_s": elapsed, "usage": usage}
 
 
+def _sweep_stray_claude_at_startup() -> None:
+    """Proactive sweep BEFORE ClaudeClient init. Uses MaxClient's own
+    protected-pid logic so ancestor Claude Code session survives.
+    """
+    if os.environ.get("CLAUDE_MAX_KILL_OTHERS") != "1":
+        return
+    try:
+        from src.llm import MaxClient
+        mc = MaxClient()
+        mc._kill_stray_claude()
+        print("[pipeline] stray claude sweep done")
+    except Exception as e:
+        print(f"[pipeline] stray claude sweep skipped: {e}", file=sys.stderr)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    _sweep_stray_claude_at_startup()
     import argparse
 
     # Peek for stage/from/to without re-parsing everything — Context.from_args owns the full parser.

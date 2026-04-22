@@ -211,6 +211,10 @@ def label_spa_templates(ctx: Context) -> dict[int, SpaTemplateLabel]:
     steps_summary = _steps_summary(ctx)
     batch_size = max(1, int(os.environ.get("STAGE4_TEMPLATE_BATCH_SIZE", "1")))
     workers = max(1, int(os.environ.get("STAGE4_CONCURRENCY", "8")))
+    log.info(
+        "stage4: templates=%d, batch_size=%d, workers=%d",
+        len(templates), batch_size, workers,
+    )
 
     labels: dict[int, SpaTemplateLabel] = {}
 
@@ -371,6 +375,11 @@ def label_customer_messages(ctx: Context) -> dict[int, CustomerLabel]:
     steps_summary = _steps_summary(ctx)
     objections_block = _objection_triggers_block(ctx)
     batches = _pack_customer_batches(items, CUSTOMER_BATCH_SIZE)
+    workers_info = os.environ.get("STAGE4_CONCURRENCY", "8")
+    log.info(
+        "stage4: customer msgs=%d, batches=%d (size=%d), workers=%s",
+        len(items), len(batches), CUSTOMER_BATCH_SIZE, workers_info,
+    )
 
     def _run_batch(batch: list[dict]) -> tuple[list[dict], CustomerBatchResult]:
         user_msg = _build_customer_user_msg(steps_summary, objections_block, batch)
@@ -453,21 +462,34 @@ def _derive_step_context(matches_script: Optional[bool]) -> Literal["on_script",
 
 def run(ctx: Context) -> dict:
     t0 = time.time()
+    log.info(
+        "stage4: STAGE4_CONCURRENCY=%s, STAGE4_TEMPLATE_BATCH_SIZE=%s",
+        os.environ.get("STAGE4_CONCURRENCY", "8"),
+        os.environ.get("STAGE4_TEMPLATE_BATCH_SIZE", "1"),
+    )
     convos_path = ctx.data_dir / "conversations.jsonl"
     if not convos_path.exists():
         raise FileNotFoundError(f"missing stage 1 output: {convos_path}")
 
     spa_labels_path = ctx.data_dir / SPA_LABELS_RELPATH
     if not spa_labels_path.exists() or ctx.force:
+        log.info("stage4: --- spa template labeling START (model=%s) ---", LABEL_MODEL)
+        t_spa = time.time()
         label_spa_templates(ctx)
+        log.info("stage4: --- spa template labeling END (%.1fs) ---", time.time() - t_spa)
     else:
         log.info("stage4: spa_template_labels.json exists, skipping (use --force)")
 
     customer_labels_path = ctx.data_dir / CUSTOMER_LABELS_RELPATH
     if not customer_labels_path.exists() or ctx.force:
+        log.info("stage4: --- customer message labeling START (model=%s) ---", LABEL_MODEL)
+        t_cust = time.time()
         label_customer_messages(ctx)
+        log.info("stage4: --- customer message labeling END (%.1fs) ---", time.time() - t_cust)
     else:
         log.info("stage4: customer_labels.json exists, skipping (use --force)")
+
+    log.info("stage4: --- merging labels into labeled_messages.jsonl ---")
 
     template_map = _load_template_map(ctx)
     spa_labels = _load_spa_labels(ctx)

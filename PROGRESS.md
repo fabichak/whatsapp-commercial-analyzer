@@ -23,7 +23,7 @@ Check off each task as it is completed. Keep this file in sync with the task bre
 | [x] | M2-S4-T2 | Stage 4 customer batching & tagging | 4h | M2-S4-T1 | $1.50 |
 | [x] | M2-S5-T1 | Stage 5 template sentiment | 3h | M1-T3 | $0.40 |
 | [x] | M2-S6-T1 | Stage 6 truncation utility | 2h | M1-T2, M2-S4-T2 | $0 |
-| [ ] | M3-T1 | Ground-truth collection helper (20 chats) | 3h | M1-T2 | $0 |
+| [x] | M3-T1 | Ground-truth collection helper (20 chats) | 3h | M1-T2 | $0 |
 | [ ] | M2-S6-T2 | Stage 6 conversion detection | 5h | M2-S6-T1, M2-S4-T2, M3-T1 | $1.80 |
 | [ ] | M2-S6-T3 | Stage 6 turnaround extraction (pure) | 3h | M2-S6-T2 | $0 |
 | [ ] | M2-S7-T1 | Stage 7 embedding + HDBSCAN | 4h | M2-S4-T2 | $0 |
@@ -31,7 +31,7 @@ Check off each task as it is completed. Keep this file in sync with the task bre
 | [ ] | M3-T2 | Prompt-tuning loop for Stage 6 (≥16/20) | 2–4h | M2-S6-T2 | $0.50 |
 | [ ] | M3-T3 | Full-corpus run | 1h | all M2 | $6–8 |
 | [ ] | M3-T4 | Human review + script v2 draft | 3h | M3-T3 | $0.30 |
-| [~] | M2-OPS-T1 | Safe `CLAUDE_MAX_KILL_OTHERS` — spare process tree | 1–2h | M0-T2 | $0 |
+| [x] | M2-OPS-T1 | Safe `CLAUDE_MAX_KILL_OTHERS` — spare process tree | 1–2h | M0-T2 | $0 |
 
 **Total effort:** ~70–85 dev-hours (~2 working weeks).
 **LLM spend projection:** $8–10 including calibration.

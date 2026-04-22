@@ -204,8 +204,6 @@ run_claude() {
 # ─────────────────────────────────────────────
 # Task queue
 # ─────────────────────────────────────────────
-run_claude "M2-S6-T1"  "M2-S6-T1"  || exit 1
-run_claude "M3-T1"     "M3-T1"     || exit 1
 run_claude "M2-S6-T2"  "M2-S6-T2"  || exit 1
 run_claude "M2-S6-T3"  "M2-S6-T3"  || exit 1
 run_claude "M2-S7-T1"  "M2-S7-T1"  || exit 1
@@ -213,7 +211,6 @@ run_claude "M2-S8-T1"  "M2-S8-T1"  || exit 1
 run_claude "M3-T2"     "M3-T2"     || exit 1
 run_claude "M3-T3"     "M3-T3"     || exit 1
 run_claude "M3-T4"     "M3-T4"     || exit 1
-run_claude "M2-OPS-T1" "M2-OPS-T1"     || exit 1
 
 # run_claude "M3-T5"     "M3-T5"     || exit 1
 
