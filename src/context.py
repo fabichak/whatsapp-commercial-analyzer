@@ -1,6 +1,6 @@
 """Shared Context dataclass + CLI argument parsing.
 
-See TECH_PLAN.md §M0-T3 and §M1-T1 for spec.
+See TECH_PLAN.md §M0-T3, §M1-T1, and Revision v4 (input/ folder + resume).
 """
 
 from __future__ import annotations
@@ -40,6 +40,25 @@ def _load_phones(path: Path) -> tuple[frozenset[str], str]:
     return frozen, h
 
 
+def _hash_file(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_input_hash(db_path: Path, script_md: Path, script_yaml: Path) -> str:
+    parts = [
+        f"db={_hash_file(db_path)}",
+        f"md={_hash_file(script_md)}",
+        f"yaml={_hash_file(script_yaml)}",
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
 @dataclass
 class Context:
     db_path: Path
@@ -47,14 +66,26 @@ class Context:
     data_dir: Path
     output_dir: Path
     prompts_dir: Path
+    input_dir: Path = field(default_factory=lambda: _REPO_ROOT / "input")
+    script_yaml_path: Optional[Path] = None
+    input_hash: Optional[str] = None
     chat_limit: Optional[int] = None
     phones_filter: Optional[frozenset[str]] = None
     phones_hash: Optional[str] = None
     llm_mode: LlmMode = "hybrid"
     budget_usd: float = 10.0
     force: bool = False
+    restart: bool = False
     dry_run: bool = False
     client: Optional[ClaudeClient] = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.script_yaml_path is None:
+            self.script_yaml_path = self.input_dir / "script.yaml"
+        if self.input_hash is None:
+            self.input_hash = compute_input_hash(
+                self.db_path, self.script_path, self.script_yaml_path
+            )
 
     @classmethod
     def from_args(
@@ -75,10 +106,15 @@ class Context:
             default="hybrid",
         )
         p.add_argument("--budget-usd", type=float, default=10.0)
-        p.add_argument("--force", action="store_true")
+        p.add_argument("--force", action="store_true",
+                       help="deprecated alias for --restart")
+        p.add_argument("--restart", action="store_true",
+                       help="discard prior sentinels + LLM cache; run from scratch")
         p.add_argument("--dry-run", action="store_true")
-        p.add_argument("--db-path", type=Path, default=_REPO_ROOT / "msgstore.db")
-        p.add_argument("--script-path", type=Path, default=_REPO_ROOT / "script-comercial.md")
+        p.add_argument("--input-dir", type=Path, default=_REPO_ROOT / "input")
+        p.add_argument("--db-path", type=Path, default=None)
+        p.add_argument("--script-path", type=Path, default=None)
+        p.add_argument("--script-yaml", type=Path, default=None)
         p.add_argument("--data-dir", type=Path, default=_REPO_ROOT / "data")
         p.add_argument("--output-dir", type=Path, default=_REPO_ROOT / "output")
         p.add_argument("--prompts-dir", type=Path, default=_REPO_ROOT / "prompts")
@@ -88,6 +124,10 @@ class Context:
         if ns.chat_limit is not None and ns.phones_file is not None:
             p.error("--chat-limit and --phones-file are mutually exclusive")
 
+        db_path = ns.db_path if ns.db_path is not None else ns.input_dir / "msgstore.db"
+        script_path = ns.script_path if ns.script_path is not None else ns.input_dir / "script-comercial.md"
+        script_yaml = ns.script_yaml if ns.script_yaml is not None else ns.input_dir / "script.yaml"
+
         phones_filter: Optional[frozenset[str]] = None
         phones_hash: Optional[str] = None
         if ns.phones_file is not None:
@@ -96,20 +136,31 @@ class Context:
         ns.data_dir.mkdir(parents=True, exist_ok=True)
         ns.output_dir.mkdir(parents=True, exist_ok=True)
 
-        client = ClaudeClient(llm_mode=ns.llm_mode, budget_usd=ns.budget_usd) if build_client else None
+        input_hash = compute_input_hash(db_path, script_path, script_yaml)
+
+        restart = ns.restart or ns.force
+        client = None
+        if build_client:
+            client = ClaudeClient(llm_mode=ns.llm_mode, budget_usd=ns.budget_usd)
+            cache_dir = ns.data_dir / "llm_cache"
+            client.set_cache(cache_dir, input_hash)
 
         return cls(
-            db_path=ns.db_path,
-            script_path=ns.script_path,
+            db_path=db_path,
+            script_path=script_path,
             data_dir=ns.data_dir,
             output_dir=ns.output_dir,
             prompts_dir=ns.prompts_dir,
+            input_dir=ns.input_dir,
+            script_yaml_path=script_yaml,
+            input_hash=input_hash,
             chat_limit=ns.chat_limit,
             phones_filter=phones_filter,
             phones_hash=phones_hash,
             llm_mode=ns.llm_mode,
             budget_usd=ns.budget_usd,
             force=ns.force,
+            restart=restart,
             dry_run=ns.dry_run,
             client=client,
         )

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -90,6 +91,12 @@ class CustomerBatchResult(BaseModel):
 # ---------------- helpers ----------------
 
 
+def _atomic_write_json(path: Path, payload: dict | list) -> None:
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _read_prompt(ctx: Context) -> str:
     p = ctx.prompts_dir / SPA_PROMPT_RELPATH
     if not p.exists():
@@ -111,7 +118,7 @@ def _load_template_map(ctx: Context) -> dict[int, int]:
 
 def _steps_summary(ctx: Context) -> str:
     """Compact PT-BR summary of the 9 script steps for the prompt."""
-    path = ctx.data_dir / SCRIPT_YAML_RELPATH
+    path = ctx.script_yaml_path
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     lines: list[str] = []
     for s in doc.get("steps", []):
@@ -216,49 +223,68 @@ def label_spa_templates(ctx: Context) -> dict[int, SpaTemplateLabel]:
         len(templates), batch_size, workers,
     )
 
-    labels: dict[int, SpaTemplateLabel] = {}
+    out_path = ctx.data_dir / SPA_LABELS_RELPATH
+    if getattr(ctx, "force", False) or getattr(ctx, "restart", False):
+        labels: dict[int, SpaTemplateLabel] = {}
+    else:
+        labels = _load_spa_labels(ctx) if out_path.exists() else {}
+    if labels:
+        log.info("stage4: resuming with %d template labels already on disk", len(labels))
+    write_lock = threading.Lock()
+
+    def _flush() -> None:
+        with write_lock:
+            _atomic_write_json(
+                out_path,
+                {str(tid): lb.model_dump() for tid, lb in labels.items()},
+            )
 
     if batch_size == 1:
         system = _read_prompt(ctx)
+        pending = [t for t in templates if t.template_id not in labels]
+        log.info("stage4: %d templates to label (skipping %d done)",
+                 len(pending), len(templates) - len(pending))
         if workers == 1:
-            for tmpl in tqdm(templates, desc="stage4: spa templates", disable=None):
+            for tmpl in tqdm(pending, desc="stage4: spa templates", disable=None):
                 labels[tmpl.template_id] = _label_one_template(
                     ctx, system, steps_summary, tmpl.canonical_text
                 )
+                _flush()
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futs = {
                     pool.submit(_label_one_template, ctx, system, steps_summary, t.canonical_text): t.template_id
-                    for t in templates
+                    for t in pending
                 }
                 for fut in tqdm(as_completed(futs), total=len(futs), desc="stage4: spa templates", disable=None):
                     labels[futs[fut]] = fut.result()
+                    _flush()
     else:
         batch_prompt_path = ctx.prompts_dir / SPA_BATCH_PROMPT_RELPATH
         if not batch_prompt_path.exists():
             raise FileNotFoundError(f"missing batch prompt: {batch_prompt_path}")
         system = batch_prompt_path.read_text(encoding="utf-8")
-        batches = [templates[i:i + batch_size] for i in range(0, len(templates), batch_size)]
-        log.info("stage4: spa templates batched — %d batches × up to %d", len(batches), batch_size)
+        pending = [t for t in templates if t.template_id not in labels]
+        batches = [pending[i:i + batch_size] for i in range(0, len(pending), batch_size)]
+        log.info("stage4: spa templates batched — %d batches × up to %d (%d already labeled)",
+                 len(batches), batch_size, len(labels))
+
+        def _run_and_flush(b: list) -> None:
+            result = _label_template_batch(ctx, system, steps_summary, b)
+            labels.update(result)
+            _flush()
+
         if workers == 1:
             for b in tqdm(batches, desc="stage4: spa template batches", disable=None):
-                labels.update(_label_template_batch(ctx, system, steps_summary, b))
+                _run_and_flush(b)
         else:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                futs = [pool.submit(_label_template_batch, ctx, system, steps_summary, b) for b in batches]
+                futs = [pool.submit(_run_and_flush, b) for b in batches]
                 for fut in tqdm(as_completed(futs), total=len(futs), desc="stage4: spa template batches", disable=None):
-                    labels.update(fut.result())
+                    fut.result()
 
-    out = ctx.data_dir / SPA_LABELS_RELPATH
-    out.write_text(
-        json.dumps(
-            {str(tid): lb.model_dump() for tid, lb in labels.items()},
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    log.info("stage4: wrote %d template labels → %s", len(labels), out)
+    _flush()
+    log.info("stage4: wrote %d template labels → %s", len(labels), out_path)
     return labels
 
 
@@ -274,7 +300,7 @@ def _read_customer_prompt(ctx: Context) -> str:
 
 def _objection_triggers_block(ctx: Context) -> str:
     """PT-BR list of objection ids + example triggers, pulled from script.yaml."""
-    path = ctx.data_dir / SCRIPT_YAML_RELPATH
+    path = ctx.script_yaml_path
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     tax = doc.get("objection_taxonomy", []) or []
     lines: list[str] = []
@@ -365,20 +391,28 @@ def label_customer_messages(ctx: Context) -> dict[int, CustomerLabel]:
         raise FileNotFoundError(f"missing stage 1 output: {convos_path}")
 
     items = _collect_customer_items(convos_path)
+    out = ctx.data_dir / CUSTOMER_LABELS_RELPATH
     if not items:
         log.info("stage4: no customer messages to label")
-        out = ctx.data_dir / CUSTOMER_LABELS_RELPATH
         out.write_text("{}", encoding="utf-8")
         return {}
+
+    if getattr(ctx, "force", False) or getattr(ctx, "restart", False):
+        labels: dict[int, CustomerLabel] = {}
+    else:
+        labels = _load_customer_labels(ctx) if out.exists() else {}
+    if labels:
+        log.info("stage4: resuming with %d customer labels already on disk", len(labels))
 
     system = _read_customer_prompt(ctx)
     steps_summary = _steps_summary(ctx)
     objections_block = _objection_triggers_block(ctx)
-    batches = _pack_customer_batches(items, CUSTOMER_BATCH_SIZE)
+    pending_items = [it for it in items if it["msg_id"] not in labels]
+    batches = _pack_customer_batches(pending_items, CUSTOMER_BATCH_SIZE)
     workers_info = os.environ.get("STAGE4_CONCURRENCY", "8")
     log.info(
-        "stage4: customer msgs=%d, batches=%d (size=%d), workers=%s",
-        len(items), len(batches), CUSTOMER_BATCH_SIZE, workers_info,
+        "stage4: customer msgs=%d (pending=%d), batches=%d (size=%d), workers=%s",
+        len(items), len(pending_items), len(batches), CUSTOMER_BATCH_SIZE, workers_info,
     )
 
     def _run_batch(batch: list[dict]) -> tuple[list[dict], CustomerBatchResult]:
@@ -396,8 +430,15 @@ def label_customer_messages(ctx: Context) -> dict[int, CustomerLabel]:
             )
         return batch, result
 
-    labels: dict[int, CustomerLabel] = {}
     workers = max(1, int(os.environ.get("STAGE4_CONCURRENCY", "8")))
+    write_lock = threading.Lock()
+
+    def _flush() -> None:
+        with write_lock:
+            _atomic_write_json(
+                out,
+                {str(mid): lb.model_dump() for mid, lb in labels.items()},
+            )
 
     def _absorb(batch: list[dict], result: CustomerBatchResult) -> None:
         expected_ids = {it["msg_id"] for it in batch}
@@ -410,6 +451,7 @@ def label_customer_messages(ctx: Context) -> dict[int, CustomerLabel]:
         missing = expected_ids - {lb.msg_id for lb in result.items}
         if missing:
             log.warning("stage4: customer batch missing %d labels: %s", len(missing), sorted(missing)[:5])
+        _flush()
 
     if workers == 1:
         for batch in tqdm(batches, desc="stage4: customer batches", disable=None):
@@ -420,15 +462,7 @@ def label_customer_messages(ctx: Context) -> dict[int, CustomerLabel]:
             for fut in tqdm(as_completed(futs), total=len(futs), desc="stage4: customer batches", disable=None):
                 _absorb(*fut.result())
 
-    out = ctx.data_dir / CUSTOMER_LABELS_RELPATH
-    out.write_text(
-        json.dumps(
-            {str(mid): lb.model_dump() for mid, lb in labels.items()},
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    _flush()
     log.info(
         "stage4: wrote %d customer labels (%d batches) → %s",
         len(labels), len(batches), out,
@@ -472,22 +506,17 @@ def run(ctx: Context) -> dict:
         raise FileNotFoundError(f"missing stage 1 output: {convos_path}")
 
     spa_labels_path = ctx.data_dir / SPA_LABELS_RELPATH
-    if not spa_labels_path.exists() or ctx.force:
-        log.info("stage4: --- spa template labeling START (model=%s) ---", LABEL_MODEL)
-        t_spa = time.time()
-        label_spa_templates(ctx)
-        log.info("stage4: --- spa template labeling END (%.1fs) ---", time.time() - t_spa)
-    else:
-        log.info("stage4: spa_template_labels.json exists, skipping (use --force)")
-
     customer_labels_path = ctx.data_dir / CUSTOMER_LABELS_RELPATH
-    if not customer_labels_path.exists() or ctx.force:
-        log.info("stage4: --- customer message labeling START (model=%s) ---", LABEL_MODEL)
-        t_cust = time.time()
-        label_customer_messages(ctx)
-        log.info("stage4: --- customer message labeling END (%.1fs) ---", time.time() - t_cust)
-    else:
-        log.info("stage4: customer_labels.json exists, skipping (use --force)")
+
+    log.info("stage4: --- spa template labeling START (model=%s) ---", LABEL_MODEL)
+    t_spa = time.time()
+    label_spa_templates(ctx)
+    log.info("stage4: --- spa template labeling END (%.1fs) ---", time.time() - t_spa)
+
+    log.info("stage4: --- customer message labeling START (model=%s) ---", LABEL_MODEL)
+    t_cust = time.time()
+    label_customer_messages(ctx)
+    log.info("stage4: --- customer message labeling END (%.1fs) ---", time.time() - t_cust)
 
     log.info("stage4: --- merging labels into labeled_messages.jsonl ---")
 
@@ -562,7 +591,7 @@ def run(ctx: Context) -> dict:
 
     return {
         "stage": 4,
-        "outputs": [out_path, spa_labels_path],
+        "outputs": [out_path, spa_labels_path, customer_labels_path],
         "llm_usd_max": 0.0,
         "llm_usd_api": api_cost,
         "elapsed_s": time.time() - t0,

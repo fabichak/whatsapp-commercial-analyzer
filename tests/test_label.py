@@ -24,7 +24,8 @@ from src.label import (
 from src.schemas import LabeledMessage
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT_YAML = REPO_ROOT / "data" / "script.yaml"
+SCRIPT_YAML = REPO_ROOT / "input" / "script.yaml"
+SCRIPT_MD = REPO_ROOT / "input" / "script-comercial.md"
 PROMPTS_DIR = REPO_ROOT / "prompts"
 
 
@@ -64,7 +65,11 @@ class MiniCtx:
     output_dir: Path
     prompts_dir: Path
     client: object
+    script_yaml_path: Path | None = None
+    input_dir: Path | None = None
+    input_hash: str | None = "test"
     force: bool = False
+    restart: bool = False
     chat_limit: int | None = None
     phones_filter: object | None = None
     phones_hash: str | None = None
@@ -94,13 +99,17 @@ def _write_convos(data_dir: Path, convos: list[dict]) -> None:
 def _prep_ctx(tmp_path: Path, client) -> MiniCtx:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    shutil.copyfile(SCRIPT_YAML, data_dir / "script.yaml")
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    shutil.copyfile(SCRIPT_YAML, input_dir / "script.yaml")
     return MiniCtx(
         db_path=tmp_path / "msgstore.db",
-        script_path=REPO_ROOT / "script-comercial.md",
+        script_path=SCRIPT_MD,
         data_dir=data_dir,
         output_dir=tmp_path / "out",
         prompts_dir=PROMPTS_DIR,
+        input_dir=input_dir,
+        script_yaml_path=input_dir / "script.yaml",
         client=client,
     )
 
@@ -192,8 +201,13 @@ def test_run_propagates_labels_to_all_instances(tmp_path):
         ],
     )
 
-    # pre-fill empty customer cache so this T1 test isolates spa labeling
-    (ctx.data_dir / "customer_labels.json").write_text("{}", encoding="utf-8")
+    # pre-fill customer cache with the single customer msg so this T1 test
+    # isolates spa labeling (incremental resume skips batches whose items are
+    # all already labeled).
+    (ctx.data_dir / "customer_labels.json").write_text(
+        json.dumps({"15": {"msg_id": 15, "step_context": "unknown"}}),
+        encoding="utf-8",
+    )
 
     client = FakeClient(
         [

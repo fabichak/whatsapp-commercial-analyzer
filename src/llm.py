@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional, Type
 
+import hashlib
+import threading
+
 import anthropic
 from anthropic import APIConnectionError, APITimeoutError, RateLimitError
 from dotenv import load_dotenv
@@ -513,8 +516,12 @@ class ClaudeClient:
         self._usage = {
             "max": _new_bucket(with_cost=False),
             "api": _new_bucket(with_cost=True),
+            "cache": _new_bucket(with_cost=False),
             "fallback_events": [],
         }
+        self._cache_dir: Optional[Path] = None
+        self._cache_input_hash: str = ""
+        self._cache_lock = threading.Lock()
 
         oauth_available = has_oauth or max_client is not None
         api_available = bool(api_key) or api_client is not None
@@ -642,6 +649,28 @@ class ClaudeClient:
         max_tokens: int = 1024,
         response_format: Optional[Type[BaseModel]] = None,
     ) -> Any:
+        cache_key = None
+        if self._cache_dir is not None:
+            cache_key = self._cache_key(model, messages, system, response_format)
+            hit = self._cache_read(cache_key, response_format)
+            if hit is not None:
+                self._usage["cache"]["calls"] += 1
+                return hit
+        result = self._complete_uncached(
+            model, messages, system, max_tokens, response_format
+        )
+        if cache_key is not None:
+            self._cache_write(cache_key, result)
+        return result
+
+    def _complete_uncached(
+        self,
+        model: str,
+        messages: list[dict],
+        system: str = "",
+        max_tokens: int = 1024,
+        response_format: Optional[Type[BaseModel]] = None,
+    ) -> Any:
         if self.llm_mode == "api":
             return self._api_call(model, messages, system, max_tokens, response_format)
 
@@ -697,5 +726,84 @@ class ClaudeClient:
         self._usage = {
             "max": _new_bucket(with_cost=False),
             "api": _new_bucket(with_cost=True),
+            "cache": _new_bucket(with_cost=False),
             "fallback_events": [],
         }
+
+    # ---------- disk cache ----------
+
+    def set_cache(self, cache_dir: Path, input_hash: str) -> None:
+        """Enable disk-cache of complete() calls.
+
+        Key includes input_hash so content changes under input/ invalidate
+        prior entries automatically. Call once after Context init.
+        """
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self._cache_dir = cache_dir
+        self._cache_input_hash = input_hash
+
+    def _cache_key(
+        self,
+        model: str,
+        messages: list[dict],
+        system: str,
+        response_format: Optional[Type[BaseModel]],
+    ) -> str:
+        rf_name = response_format.__name__ if response_format is not None else ""
+        rf_schema = (
+            json.dumps(response_format.model_json_schema(), sort_keys=True, ensure_ascii=False)
+            if response_format is not None
+            else ""
+        )
+        blob = json.dumps(
+            {
+                "model": model,
+                "messages": messages,
+                "system": system,
+                "rf_name": rf_name,
+                "rf_schema": rf_schema,
+                "input_hash": self._cache_input_hash,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def _cache_read(
+        self, key: str, response_format: Optional[Type[BaseModel]]
+    ) -> Optional[Any]:
+        if self._cache_dir is None:
+            return None
+        p = self._cache_dir / f"{key}.json"
+        if not p.exists():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if response_format is not None:
+            try:
+                return response_format.model_validate(data["parsed"])
+            except (ValidationError, KeyError):
+                return None
+        return data.get("text", "")
+
+    def _cache_write(self, key: str, result: Any) -> None:
+        if self._cache_dir is None:
+            return
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        p = self._cache_dir / f"{key}.json"
+        if isinstance(result, BaseModel):
+            payload: dict[str, Any] = {"parsed": result.model_dump(mode="json")}
+        else:
+            payload = {"text": result if isinstance(result, str) else str(result)}
+        tmp = p.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass

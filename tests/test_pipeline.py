@@ -29,6 +29,7 @@ def _make_ctx(tmp_path: Path, **overrides) -> Context:
         llm_mode="api",
         budget_usd=1.0,
         force=False,
+        restart=False,
         dry_run=False,
         client=None,
     )
@@ -60,9 +61,10 @@ def test_stage_sentinels_written(monkeypatch, tmp_path):
 
 def test_skip_completed_stages(monkeypatch, tmp_path):
     ctx = _make_ctx(tmp_path)
-    # Pre-write matching sentinel.
+    # Pre-write matching sentinel (must include input_hash).
     rp.sentinel_path(ctx, 1).write_text(
-        json.dumps({"chat_limit": None, "phones_hash": None, "llm_mode": "api"})
+        json.dumps({"chat_limit": None, "phones_hash": None,
+                    "input_hash": ctx.input_hash, "llm_mode": "api"})
     )
     calls = []
     _install_fake_stage(monkeypatch, 1, lambda c: calls.append("ran") or {"outputs": []})
@@ -71,10 +73,10 @@ def test_skip_completed_stages(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_force_flag_reruns(monkeypatch, tmp_path):
-    ctx = _make_ctx(tmp_path, force=True)
+def test_restart_flag_reruns(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path, restart=True)
     rp.sentinel_path(ctx, 1).write_text(
-        json.dumps({"chat_limit": None, "phones_hash": None})
+        json.dumps({"chat_limit": None, "phones_hash": None, "input_hash": ctx.input_hash})
     )
     calls = []
     _install_fake_stage(monkeypatch, 1, lambda c: calls.append("ran") or {"outputs": []})
@@ -86,7 +88,7 @@ def test_force_flag_reruns(monkeypatch, tmp_path):
 def test_sentinel_invalidated_by_phones_hash_change(monkeypatch, tmp_path):
     ctx = _make_ctx(tmp_path, phones_hash="BBBB")
     rp.sentinel_path(ctx, 1).write_text(
-        json.dumps({"chat_limit": None, "phones_hash": "AAAA"})
+        json.dumps({"chat_limit": None, "phones_hash": "AAAA", "input_hash": ctx.input_hash})
     )
     calls = []
     _install_fake_stage(monkeypatch, 1, lambda c: calls.append("ran") or {"outputs": []})
@@ -98,7 +100,19 @@ def test_sentinel_invalidated_by_phones_hash_change(monkeypatch, tmp_path):
 def test_sentinel_invalidated_by_chat_limit_change(monkeypatch, tmp_path):
     ctx = _make_ctx(tmp_path, chat_limit=None)
     rp.sentinel_path(ctx, 1).write_text(
-        json.dumps({"chat_limit": 5, "phones_hash": None})
+        json.dumps({"chat_limit": 5, "phones_hash": None, "input_hash": ctx.input_hash})
+    )
+    calls = []
+    _install_fake_stage(monkeypatch, 1, lambda c: calls.append("ran") or {"outputs": []})
+    monkeypatch.setitem(rp.STAGE_PREREQS, 1, [])
+    rp.run_pipeline(ctx, [1])
+    assert calls == ["ran"]
+
+
+def test_sentinel_invalidated_by_input_hash_change(monkeypatch, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    rp.sentinel_path(ctx, 1).write_text(
+        json.dumps({"chat_limit": None, "phones_hash": None, "input_hash": "stale"})
     )
     calls = []
     _install_fake_stage(monkeypatch, 1, lambda c: calls.append("ran") or {"outputs": []})

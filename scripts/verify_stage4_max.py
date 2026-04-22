@@ -53,8 +53,8 @@ def main() -> int:
 
         client = ClaudeClient(llm_mode="max", budget_usd=1.0)
         ctx = Context(
-            db_path=REPO / "msgstore.db",
-            script_path=REPO / "script-comercial.md",
+            db_path=REPO / "input" / "msgstore.db",
+            script_path=REPO / "input" / "script-comercial.md",
             data_dir=data_dir,
             output_dir=Path(td) / "out",
             prompts_dir=REPO / "prompts",

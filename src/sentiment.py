@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 import time
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel
@@ -71,6 +74,33 @@ def _validate(ts: TemplateSentiment) -> None:
         raise ValueError(f"invalid polarity {ts.polarity!r}")
 
 
+def _atomic_write_json(path: Path, payload) -> None:
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _load_existing(path: Path) -> dict[int, TemplateSentiment]:
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, list):
+        return {}
+    out: dict[int, TemplateSentiment] = {}
+    for item in raw:
+        try:
+            ts = TemplateSentiment.model_validate(item)
+        except Exception:
+            continue
+        if ts.critique == "(não avaliado)":
+            continue  # stub, redo
+        out[ts.template_id] = ts
+    return out
+
+
 def score_templates(ctx: Context) -> list[TemplateSentiment]:
     if ctx.client is None:
         raise RuntimeError("score_templates requires ctx.client")
@@ -79,14 +109,27 @@ def score_templates(ctx: Context) -> list[TemplateSentiment]:
     if not templates:
         return []
 
+    out_path = ctx.data_dir / OUTPUT_RELPATH
+    if getattr(ctx, "force", False) or getattr(ctx, "restart", False):
+        out: dict[int, TemplateSentiment] = {}
+    else:
+        out = _load_existing(out_path)
+    if out:
+        log.info("stage5: resuming with %d sentiments already on disk", len(out))
+
     system = _read_prompt(ctx)
+    pending = [t for t in templates if t.template_id not in out]
     items = [
         {"template_id": t.template_id, "text": t.canonical_text[:TEXT_CHAR_CAP]}
-        for t in templates
+        for t in pending
     ]
     batches = _pack_batches(items)
+    log.info("stage5: %d pending templates, %d batches", len(pending), len(batches))
 
-    out: dict[int, TemplateSentiment] = {}
+    def _flush() -> None:
+        ordered = [out[t.template_id] for t in templates if t.template_id in out]
+        _atomic_write_json(out_path, [s.model_dump() for s in ordered])
+
     for batch in tqdm(batches, desc="stage5: sentiment batches", disable=None):
         user_msg = _build_user_msg(batch)
         result = ctx.client.complete(
@@ -108,7 +151,9 @@ def score_templates(ctx: Context) -> list[TemplateSentiment]:
         missing = expected - {ts.template_id for ts in result.items}
         if missing:
             log.warning("stage5: batch missing %d templates: %s", len(missing), sorted(missing)[:5])
+        _flush()
 
+    _flush()
     # Preserve template order from spa_templates.json
     ordered = [out[t.template_id] for t in templates if t.template_id in out]
     return ordered
@@ -120,28 +165,8 @@ def run(ctx: Context) -> dict:
     out_path = ctx.data_dir / OUTPUT_RELPATH
     ctx.data_dir.mkdir(parents=True, exist_ok=True)
 
-    if out_path.exists() and not ctx.force:
-        raw = json.loads(out_path.read_text(encoding="utf-8"))
-        # If stub-filled (all "(não avaliado)"), re-score.
-        is_stub = bool(raw) and all(
-            r.get("critique") == "(não avaliado)" for r in raw
-        )
-        if not is_stub:
-            log.info("stage5: %s exists, skipping (use --force)", out_path)
-            return {
-                "stage": 5,
-                "outputs": [out_path],
-                "llm_usd_max": 0.0,
-                "llm_usd_api": 0.0,
-                "elapsed_s": time.time() - t0,
-            }
-        log.info("stage5: stub output detected, regenerating")
-
     scored = score_templates(ctx)
-    out_path.write_text(
-        json.dumps([s.model_dump() for s in scored], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _atomic_write_json(out_path, [s.model_dump() for s in scored])
     log.info("stage5: %d template sentiments → %s", len(scored), out_path)
 
     api_cost = 0.0

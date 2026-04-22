@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def main() -> int:
-    db = REPO / "msgstore.db"
+    db = REPO / "input" / "msgstore.db"
     if not db.exists():
         print(f"missing {db}", file=sys.stderr)
         return 2
@@ -29,7 +29,7 @@ def main() -> int:
         data_dir = Path(td) / "data"
         ctx = Context(
             db_path=db,
-            script_path=REPO / "script-comercial.md",
+            script_path=REPO / "input" / "script-comercial.md",
             data_dir=data_dir,
             output_dir=Path(td) / "out",
             prompts_dir=REPO / "prompts",

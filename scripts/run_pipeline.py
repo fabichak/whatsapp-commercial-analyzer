@@ -46,7 +46,7 @@ STAGE_PREREQS: dict[int, list[str]] = {
     1: [],
     2: ["conversations.jsonl"],
     3: [],
-    4: ["conversations.jsonl", "spa_templates.json", "script.yaml"],
+    4: ["conversations.jsonl", "spa_templates.json"],
     5: ["spa_templates.json"],
     6: ["conversations.jsonl", "labeled_messages.jsonl"],
     7: ["labeled_messages.jsonl"],
@@ -112,6 +112,7 @@ def write_sentinel(ctx: Context, stage: int, result: dict) -> None:
         "module_version": MODULE_VERSION,
         "chat_limit": ctx.chat_limit,
         "phones_hash": ctx.phones_hash,
+        "input_hash": ctx.input_hash,
         "llm_mode": ctx.llm_mode,
         "outputs": [str(p) for p in result.get("outputs", [])],
     }
@@ -124,7 +125,28 @@ def sentinel_valid(ctx: Context, sentinel: dict) -> bool:
     return (
         sentinel.get("chat_limit") == ctx.chat_limit
         and sentinel.get("phones_hash") == ctx.phones_hash
+        and sentinel.get("input_hash") == ctx.input_hash
     )
+
+
+def purge_state(ctx: Context) -> None:
+    """--restart: wipe all derived state in data_dir + llm_cache. Inputs
+    under input/ are untouched. After purge every stage re-runs fresh.
+    """
+    import shutil
+    if ctx.data_dir.exists():
+        for entry in ctx.data_dir.iterdir():
+            if entry.name == "ground_truth_outcomes.csv":
+                continue  # hand-labeled, preserve
+            try:
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink()
+            except OSError:
+                pass
+    ctx.data_dir.mkdir(parents=True, exist_ok=True)
+    log.info("restart: cleared %s (kept ground_truth_outcomes.csv)", ctx.data_dir)
 
 
 def check_prereqs(ctx: Context, stage: int) -> None:
@@ -169,11 +191,29 @@ def run_pipeline(ctx: Context, stages: list[int]) -> dict:
     summary: list[dict] = []
     total_api = 0.0
     t0 = time.time()
+    if ctx.restart:
+        purge_state(ctx)
     for stage in stages:
         sent = read_sentinel(ctx, stage)
-        if sent is not None and not ctx.force and sentinel_valid(ctx, sent):
+        if sent is not None and not ctx.restart and sentinel_valid(ctx, sent):
             print(f"[stage {stage}] skipped (sentinel match)")
             continue
+        # Sentinel present but invalid (input_hash / chat_limit / phones changed):
+        # prior partials are stale. Clear listed outputs + the sentinel so the
+        # stage starts clean. No --restart required — input change is the signal.
+        if sent is not None and not ctx.restart:
+            for op in sent.get("outputs", []) or []:
+                try:
+                    Path(op).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+            try:
+                sentinel_path(ctx, stage).unlink()
+            except OSError:
+                pass
+            log.info("stage %d: prior sentinel invalid (input change), cleared partials", stage)
 
         check_prereqs(ctx, stage)
         mod = load_stage_module(stage)

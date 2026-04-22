@@ -23,7 +23,7 @@ def _sha(p: Path) -> str:
 
 def main() -> int:
     src_script = REPO / "data" / "script.yaml"
-    script_md = REPO / "script-comercial.md"
+    script_md = REPO / "input" / "script-comercial.md"
     for p in (src_script, script_md):
         if not p.exists():
             print(f"missing {p}", file=sys.stderr)
@@ -38,7 +38,7 @@ def main() -> int:
 
         client = ClaudeClient(llm_mode="max", budget_usd=1.0)
         ctx = Context(
-            db_path=REPO / "msgstore.db",
+            db_path=REPO / "input" / "msgstore.db",
             script_path=script_md,
             data_dir=data_dir,
             output_dir=Path(td) / "out",

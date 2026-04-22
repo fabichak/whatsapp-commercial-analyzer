@@ -37,7 +37,7 @@ def main() -> int:
     if not src_script.exists():
         print(f"missing {src_script}", file=sys.stderr)
         return 2
-    script_md = REPO / "script-comercial.md"
+    script_md = REPO / "input" / "script-comercial.md"
     if not script_md.exists():
         print(f"missing {script_md}", file=sys.stderr)
         return 2
@@ -53,7 +53,7 @@ def main() -> int:
 
         client = ClaudeClient(llm_mode="hybrid", budget_usd=1.0)
         ctx = Context(
-            db_path=REPO / "msgstore.db",
+            db_path=REPO / "input" / "msgstore.db",
             script_path=script_md,
             data_dir=data_dir,
             output_dir=Path(td) / "out",

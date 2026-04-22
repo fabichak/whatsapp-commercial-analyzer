@@ -36,7 +36,7 @@ TAXONOMY_IDS = (
 
 
 def _script_path(ctx: Context) -> Path:
-    return ctx.data_dir / SCRIPT_YAML_RELPATH
+    return ctx.script_yaml_path
 
 
 def _extensions_path(ctx: Context) -> Path:
@@ -222,7 +222,10 @@ def run(ctx: Context) -> dict:
             len(ext.inconsistencies),
         )
 
-    outputs = [path]
+    # Only the derived extensions file is a stage-3 output. The hand-curated
+    # input/script.yaml (variable `path`) is an INPUT and must never be
+    # listed here — the orchestrator deletes listed outputs on cache-bust.
+    outputs = []
     if ext_path.exists():
         outputs.append(ext_path)
 

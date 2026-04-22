@@ -25,8 +25,8 @@ from src.script_index import (
 from src.script_index import run as stage3_run
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT_YAML = REPO_ROOT / "data" / "script.yaml"
-SCRIPT_MD = REPO_ROOT / "script-comercial.md"
+SCRIPT_YAML = REPO_ROOT / "input" / "script.yaml"
+SCRIPT_MD = REPO_ROOT / "input" / "script-comercial.md"
 PROMPTS_DIR = REPO_ROOT / "prompts"
 
 
@@ -116,7 +116,11 @@ class MiniCtx:
     output_dir: Path
     prompts_dir: Path
     client: object
+    script_yaml_path: Path | None = None
+    input_dir: Path | None = None
+    input_hash: str | None = "test"
     force: bool = False
+    restart: bool = False
     chat_limit: int | None = None
     phones_filter: object | None = None
     phones_hash: str | None = None
@@ -147,13 +151,17 @@ def _valid_extensions() -> ScriptExtensions:
 def _prep_tmp(tmp_path: Path) -> MiniCtx:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    shutil.copyfile(SCRIPT_YAML, data_dir / "script.yaml")
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    shutil.copyfile(SCRIPT_YAML, input_dir / "script.yaml")
     return MiniCtx(
         db_path=tmp_path / "msgstore.db",
         script_path=SCRIPT_MD,
         data_dir=data_dir,
         output_dir=tmp_path / "out",
         prompts_dir=PROMPTS_DIR,
+        input_dir=input_dir,
+        script_yaml_path=input_dir / "script.yaml",
         client=None,
     )
 
@@ -174,7 +182,7 @@ def test_expansion_writes_extensions_file(tmp_path):
 def test_expansion_does_not_mutate_script_yaml(tmp_path):
     ctx = _prep_tmp(tmp_path)
     ctx.client = FakeClient(_valid_extensions())
-    path = ctx.data_dir / "script.yaml"
+    path = ctx.script_yaml_path
     before = hashlib.sha256(path.read_bytes()).hexdigest()
     stage3_run(ctx)
     after = hashlib.sha256(path.read_bytes()).hexdigest()

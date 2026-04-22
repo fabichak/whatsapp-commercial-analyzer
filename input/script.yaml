@@ -1,0 +1,280 @@
+---
+# Hand-curated source of truth for the Puris Spa 1C (first-contact) sales script.
+# Derived from script-comercial.md per TECH_PLAN.md §M1-T4.
+# LLM-generated extensions live in data/script_extensions.yaml (gitignored).
+
+steps:
+  - id: "1"
+    name: "Saudação e acolhimento"
+    canonical_texts:
+      - "Olá! Bom dia 😊 Tudo bem? Seja muito bem-vinda(o) ao Puris SPA ✨ É um prazer enorme te receber por aqui. Como você se chama, por favor?"
+      - "Olá! Boa tarde 😊 Tudo bem? Seja muito bem-vinda(o) ao Puris SPA ✨ É um prazer enorme te receber por aqui. Como você se chama, por favor?"
+      - "Olá! Boa noite 😊 Tudo bem? Seja muito bem-vinda(o) ao Puris SPA ✨ É um prazer enorme te receber por aqui. Como você se chama, por favor?"
+    expected_customer_intents:
+      - "greet_back"
+      - "give_name"
+      - "ask_info"
+      - "ignore"
+    transitions_to: ["2"]
+
+  - id: "2"
+    name: "Conexão e qualificação"
+    canonical_texts:
+      - "Muito prazer, [nome]. Meu nome é [atendente]. Para que eu possa te ajudar da melhor maneira, conte um pouquinho… O que você sente que seu corpo está pedindo hoje? Vamos escolher algo que combine com o seu momento."
+    expected_customer_intents:
+      - "describe_need"
+      - "ask_service"
+      - "ask_price"
+      - "mention_stress_or_pain"
+      - "mention_gift"
+    transitions_to: ["3", "3.5"]
+
+  - id: "3"
+    name: "Validação e proximidade"
+    canonical_texts:
+      - "Perfeito, [nome], obrigada por compartilhar comigo 💫 Pelo que você me contou, acredito que uma ótima opção para você seja a [serviço]. Vou te explicar como ela funciona:"
+    expected_customer_intents:
+      - "accept_suggestion"
+      - "ask_detail"
+      - "request_alternative"
+    transitions_to: ["3.5"]
+
+  - id: "3.5"
+    name: "Apresentação dos serviços"
+    canonical_texts:
+      - "💆 Massagem Relaxante: ideal para quem precisa desacelerar; movimentos firmes e contínuos aliviam estresse, melhoram circulação e promovem relaxamento profundo."
+      - "💧 Drenagem Linfática: técnica suave que estimula o sistema linfático, reduz inchaços, elimina líquidos retidos e toxinas."
+      - "💪 Liberação Miofascial: atua nas tensões profundas dos músculos e fáscia; indicada para dores musculares, rigidez, desconforto persistente."
+      - "🏃 Massagem Desportiva: para quem pratica atividade física; previne lesões, recupera musculatura e melhora performance."
+      - "🔥 Massagem Redutora: auxilia na redução de medidas; movimentos firmes e manta térmica potencializam o resultado."
+      - "✨ Massagem Facial: atua em face, couro cabeludo, pescoço e ATM; alivia tensões, dores, enxaqueca e cefaleia tensional."
+      - "🌸 Shiatsu: terapia oriental com pressões ao longo dos meridianos; equilibra a energia vital e alivia dores."
+      - "🌿 Day Spa (2h ou 3h): escalda-pés, banho de imersão, massagem relaxante com pedras quentes; inclui chás, frutas e castanhas (e espumante nas versões 3h/casal)."
+    expected_customer_intents:
+      - "pick_service"
+      - "ask_price"
+      - "ask_duration"
+      - "ask_day_spa"
+      - "request_more_info"
+    transitions_to: ["5"]
+
+  - id: "5"
+    name: "Condução para personalização"
+    canonical_texts:
+      - "Para deixar sua experiência ainda mais completa, você pode escolher alguns adicionais, de acordo com o que mais combina com você 💆‍♀️✨ Você prefere algo mais relaxante, estético ou terapêutico?"
+    expected_customer_intents:
+      - "pick_addon_category"
+      - "skip_addons"
+      - "ask_price"
+    transitions_to: ["6", "7"]
+
+  - id: "6"
+    name: "Valores dos adicionais"
+    canonical_texts:
+      - "Ótima escolha! Para efeito mais relaxante, as clientes costumam amar pedras quentes e aromaterapia. E se quiser, pode fazer ao final uma ducha no spa por R$30,00. Você sente que algum desses combina com o seu momento hoje?"
+      - "Perfeito! Para cuidado mais estético, os adicionais que mais combinam são esfoliação corporal, hidratação dos pés, hidratação corporal e facial, revitalização facial."
+      - "Ótima escolha! Para cuidado terapêutico, os mais indicados são pedras quentes, ventosas e aromaterapia."
+      - "O valor do [adicional] é [valor]. Quer incluir esse na sua experiência?"
+    expected_customer_intents:
+      - "accept_addon"
+      - "decline_addon"
+      - "ask_more_addons"
+      - "ask_price"
+    transitions_to: ["7"]
+
+  - id: "7"
+    name: "Fechamento suave"
+    canonical_texts:
+      - "Perfeito, [nome] ✨ Posso verificar os melhores horários disponíveis pra você e já deixar tudo preparado para que sua experiência no Puris SPA seja inesquecível 💛"
+    expected_customer_intents:
+      - "give_date"
+      - "give_time"
+      - "confirm_booking"
+      - "postpone"
+      - "hesitation_vou_pensar"
+    transitions_to: []
+
+  - id: "fup1"
+    name: "Follow-up 1 (suave, 2-3h)"
+    canonical_texts:
+      - "Olá [nome]! Passei só pra saber se consegui ver minha mensagem? Fico por aqui caso queira tirar alguma dúvida."
+    expected_customer_intents:
+      - "resume_talk"
+      - "still_interested"
+      - "ignore"
+    transitions_to: ["2", "3", "7"]
+
+  - id: "fup2"
+    name: "Follow-up 2 (acolhedor + direcionamento, 24-48h)"
+    canonical_texts:
+      - "Olá [nome], tudo bem? Só passando para confirmar se você conseguiu ver minha mensagem anterior. Fico à disposição caso queira agendar seu próximo momento no Puris."
+      - "Oi [nome]! Como vai? Imagino que a rotina esteja corrida por aí. Quando quiser reservar seu horário, me chama que organizo tudo para você."
+      - "Olá [nome], tudo bem? Essa semana abrimos alguns horários especiais e lembrei de você. Se quiser, posso te enviar as opções antes de liberar na agenda geral."
+      - "Olá [nome], tudo bem? Estamos com alguns horários abertos ainda esta semana! Só passando para confirmar se você conseguiu pensar na minha proposta?"
+      - "Olá [nome], estamos com horários abertos esta semana com valores especiais. Que tal vir nos conhecer? Neste dia/horário a sessão ficaria por R$170,00 (só segunda, terça e quarta)."
+    expected_customer_intents:
+      - "resume_talk"
+      - "confirm_booking"
+      - "decline"
+      - "ignore"
+    transitions_to: ["2", "3", "7"]
+
+services:
+  - id: "massagem_relaxante"
+    name: "Massagem Relaxante"
+    base_price: 200
+  - id: "drenagem"
+    name: "Drenagem Linfática"
+    base_price: 200
+  - id: "miofascial"
+    name: "Liberação Miofascial"
+    base_price: 200
+  - id: "desportiva"
+    name: "Massagem Desportiva"
+    base_price: 200
+  - id: "redutora"
+    name: "Massagem Redutora"
+    base_price: 200
+  - id: "facial"
+    name: "Massagem Facial"
+    base_price: 200
+  - id: "shiatsu"
+    name: "Shiatsu"
+    base_price: 200
+  - id: "mini_day_spa"
+    name: "Mini Day Spa (2h)"
+    base_price: 420
+  - id: "day_spa"
+    name: "Day Spa (3h)"
+    base_price: 630
+
+price_grid:
+  - service: "massagens"
+    persons: 1
+    price: 200
+    payment_rules: "1x cartão; >1: repassa taxas; 2.5% desconto pix se pedirem"
+  - service: "mini_day_spa"
+    persons: 1
+    price: 420
+    payment_rules: "1-2x cartão; >2: repassa taxas; 3% desconto pix se pedirem"
+  - service: "mini_day_spa"
+    persons: 2
+    price: 830
+    payment_rules: "1-2x cartão; >2: repassa taxas; 3% desconto pix se pedirem"
+  - service: "mini_day_spa"
+    persons: 3
+    price: 1134
+    payment_rules: "1-2x cartão; >2: repassa taxas; 3% desconto pix se pedirem"
+  - service: "mini_day_spa"
+    persons: 4
+    price: 1512
+    payment_rules: "1-2x cartão; >2: repassa taxas; 5% desconto pix se pedirem"
+  - service: "mini_day_spa"
+    persons: 5
+    price: 1890
+    payment_rules: "1-2x cartão; >2: repassa taxas; 5% desconto pix se pedirem"
+  - service: "mini_day_spa"
+    persons: 6
+    price: 2268
+    payment_rules: "1-2x cartão; >2: repassa taxas; 5% desconto pix se pedirem"
+  - service: "day_spa"
+    persons: 1
+    price: 630
+    payment_rules: "1-2x cartão; >2: repassa taxas; 3% desconto pix se pedirem"
+  - service: "day_spa"
+    persons: 2
+    price: 1140
+    payment_rules: "1-2x cartão; >2: repassa taxas; 3% desconto pix se pedirem"
+  - service: "day_spa"
+    persons: 3
+    price: 1700
+    payment_rules: "1-2x cartão; >2: repassa taxas; 3% desconto pix se pedirem"
+  - service: "day_spa"
+    persons: 4
+    price: 2268
+    payment_rules: "1-2x cartão; >2: repassa taxas; 5% desconto pix se pedirem"
+  - service: "day_spa"
+    persons: 5
+    price: 2835
+    payment_rules: "1-2x cartão; >2: repassa taxas; 5% desconto pix se pedirem"
+  - service: "day_spa"
+    persons: 6
+    price: 3402
+    payment_rules: "1-2x cartão; >2: repassa taxas; 5% desconto pix se pedirem"
+
+additionals:
+  - name: "Pedras quentes"
+    price: 25
+  - name: "Ventosas"
+    price: 25
+  - name: "Esfoliação corporal"
+    price: 35
+  - name: "Hidratação dos pés"
+    price: 25
+  - name: "Hidratação corporal e facial"
+    price: 50
+  - name: "Revitalização facial"
+    price: 70
+  - name: "Aromaterapia"
+    price: 35
+  - name: "Ducha"
+    price: 30
+
+negotiation_rules:
+  no_unsolicited_discount: true
+  mon_wed_5pct_dayspa: true
+  no_price_before_interest: true
+
+objection_taxonomy:
+  - id: "price"
+    name_pt: "Preço / valor alto"
+    triggers: ["caro", "achei caro", "muito caro", "ta caro", "valor alto", "não cabe", "acima do orçamento", "tô ruim de grana", "tô apertado"]
+  - id: "location"
+    name_pt: "Localização / distância"
+    triggers: ["longe", "muito longe", "onde fica", "qual endereço", "não dá pra ir", "fica aonde", "bairro", "fora de mão"]
+  - id: "time_slot"
+    name_pt: "Horário / agenda"
+    triggers: ["não tenho horário", "sem tempo", "essa semana não dá", "só consigo depois", "agenda cheia", "qual horário", "horário disponível"]
+  - id: "competitor"
+    name_pt: "Outro spa / concorrente"
+    triggers: ["outro lugar", "outro spa", "já fui em outro", "prefiro o", "conhecido de"]
+  - id: "hesitation_vou_pensar"
+    name_pt: "Hesitação genérica"
+    triggers: ["vou pensar", "depois te falo", "deixa eu ver", "preciso pensar", "vou analisar"]
+  - id: "delegated_talk_to_someone"
+    name_pt: "Precisa consultar alguém"
+    triggers: ["vou falar com meu marido", "vou ver com minha esposa", "combinar com", "falar com minha mãe", "depende da"]
+  - id: "delayed_response_te_falo"
+    name_pt: "Resposta adiada"
+    triggers: ["te falo", "te retorno", "depois te aviso", "amanhã te respondo", "mais tarde te falo"]
+  - id: "trust_boundary_male"
+    name_pt: "Cliente masculino testando limites"
+    triggers: ["foto", "pode mandar foto", "tem final feliz", "que tipo de massagem", "toque íntimo"]
+  - id: "other"
+    name_pt: "Outra objeção"
+    triggers: []
+
+promocoes:
+  dia_das_maes:
+    valid_from: 2026-04-16
+    valid_until: 2026-05-17
+    usage_deadline: 2026-06-30
+    offers:
+      - name: "Massagem Especial"
+        description: "Massagem relaxante + aromaterapia + hidratação facial"
+        original_price: 285
+        promo_price: 255
+      - name: "Ritual de Renovação"
+        description: "4 massagens com pedras quentes"
+        promo_price: 790
+        promo_price_mon_thu: 695
+      - name: "Day Spa 3h Individual (Mães)"
+        description: "Day-spa normal + revitalização facial + vela + voucher físico"
+        promo_price: 740
+      - name: "Day Spa 3h Casal (Mãe + filho/filha)"
+        description: "Day-spa normal + revitalização facial + vela + voucher físico"
+        promo_price: 1250
+    discount_rules:
+      - "5% off se cliente pedir E marcação for segunda a quinta"
+      - "Sem desconto se data não estiver definida"
+      - "NUNCA ofereça desconto sem cliente pedir"
