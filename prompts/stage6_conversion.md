@@ -33,11 +33,23 @@ Use **exatamente** um destes ids (ou `null` se não houver objeção):
 ## `final_outcome`
 
 - `booked` — cliente confirmou agendamento / pagamento / chegou a
-  acordo explícito. Texto-inferido; não exigimos prova externa.
-- `lost` — cliente recusou, abandonou após objeção, ou pediu para
-  não contatarem mais.
-- `ambiguous` — conversa inconclusa (sem confirmação nem recusa
-  clara; pode ser follow-up pendente).
+  acordo explícito **em qualquer ponto da conversa**. Texto-inferido;
+  não exigimos prova externa. **Regra de aderência:** se houve
+  confirmação explícita (ex.: "fechado", "pode marcar quinta 10h",
+  comprovante de pagamento, "tá reservado"), o outcome é `booked`
+  **mesmo que a cliente cancele depois**. O cancelamento posterior
+  não reverte para `lost`/`ambiguous`.
+- `lost` — cliente recusou, abandonou após objeção, **ou demonstrou
+  interesse mas nunca confirmou data/pagamento concreto e a conversa
+  esfriou** (última mensagem dela é protelação tipo "vou ver", "te
+  falo", "já retorno", "pra frente vou marcar", sem retomada
+  posterior). Inclui também quando o SPA mandou follow-up e a cliente
+  não respondeu. Interesse verbal sem compromisso + silêncio = `lost`.
+- `ambiguous` — **use com parcimônia**. Apenas quando a conversa está
+  genuinamente em aberto: a última mensagem é **do SPA** respondendo
+  uma pergunta real da cliente (não follow-up), e não houve tempo/
+  sinal suficiente para concluir. Se a cliente foi a última a falar
+  com "vou pensar"/"te aviso" e sumiu, é `lost`, não `ambiguous`.
 
 ## Índices e excertos
 
@@ -95,6 +107,31 @@ Cada mensagem chega no formato `[MSG_ID] role: texto`. Retorne:
 → `conversion_score=0, first_objection_msg_id=24, first_objection_type=hesitation_vou_pensar,`
 `resolution_msg_id=null, winning_reply_excerpt=null, final_outcome=lost,`
 `conversion_evidence="Cliente respondeu 'vou pensar' e não retornou."`
+
+### Negativo C — interesse morno sem fechar (SOFT LOST)
+```
+[5] cli: oi, tenho interesse no day spa
+[6] spa: que delícia! sai R$380 o essência puris 💛
+[7] cli: legal, pra frente vou marcar
+[8] spa: ótimo! me avisa quando quiser reservar 💛
+[... sem resposta por semanas ...]
+```
+→ `conversion_score=0, first_objection_msg_id=7, first_objection_type=hesitation_vou_pensar,`
+`resolution_msg_id=null, winning_reply_excerpt=null, final_outcome=lost,`
+`conversion_evidence="Interesse verbal mas adiamento sem data concreta; cliente não retomou."`
+
+### Booked mesmo com cancelamento posterior
+```
+[20] cli: pode ser quinta 17h45
+[21] spa: fechado, quinta 17h45 reservado 💛
+[22] cli: combinado!
+[30] cli: oi, desculpa, caiu reunião, não vou conseguir
+[31] spa: sem problema! quer remarcar sexta?
+[32] cli: infelizmente não consigo
+```
+→ `conversion_score=3, first_objection_msg_id=null, first_objection_type=null,`
+`resolution_msg_id=null, winning_reply_excerpt=null, final_outcome=booked,`
+`conversion_evidence="Agendamento confirmado quinta 17h45; cancelamento posterior não reverte outcome."`
 
 ### Negativo B — longe demais
 ```

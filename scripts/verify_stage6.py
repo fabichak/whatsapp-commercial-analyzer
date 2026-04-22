@@ -132,9 +132,16 @@ def main() -> int:
         detected = detect_conversions(ctx)
         by_cid = {cc.chat_id: cc for cc in detected}
 
+        # persist for inspection
+        persist = REPO / "data" / "conversions.jsonl"
+        with persist.open("w", encoding="utf-8") as f:
+            for cid in sorted(by_cid):
+                f.write(json.dumps(by_cid[cid].model_dump(), ensure_ascii=False) + "\n")
+
         matches = 0
         denom = 0
         mismatches: list[tuple[int, str, str, str]] = []
+        pred_amb_on_real: list[tuple[int, str, str]] = []
         for row in gt:
             cc = by_cid.get(row["chat_id"])
             if cc is None:
@@ -142,6 +149,8 @@ def main() -> int:
             gt_out = row["outcome"]
             pred = cc.final_outcome
             if gt_out == "ambiguous" or pred == "ambiguous":
+                if gt_out != "ambiguous" and pred == "ambiguous":
+                    pred_amb_on_real.append((row["chat_id"], gt_out, cc.conversion_evidence))
                 continue
             denom += 1
             if gt_out == pred:
@@ -152,9 +161,13 @@ def main() -> int:
         print()
         print(f"match: {matches}/{denom} (ambiguous on either side excluded)")
         if mismatches:
-            print("mismatches:")
+            print("mismatches (hard):")
             for cid, gt_out, pred, evid in mismatches:
-                print(f"  chat={cid} gt={gt_out} pred={pred} :: {evid[:120]}")
+                print(f"  chat={cid} gt={gt_out} pred={pred} :: {evid[:160]}")
+        if pred_amb_on_real:
+            print("pred=ambiguous but gt=booked/lost:")
+            for cid, gt_out, evid in pred_amb_on_real:
+                print(f"  chat={cid} gt={gt_out} :: {evid[:160]}")
 
         usage = client.get_usage_report()
         api_cost = float(usage.get("api", {}).get("cost_usd", 0.0))
