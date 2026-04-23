@@ -112,6 +112,7 @@ def write_sentinel(ctx: Context, stage: int, result: dict) -> None:
         "module_version": MODULE_VERSION,
         "chat_limit": ctx.chat_limit,
         "phones_hash": ctx.phones_hash,
+        "labels_hash": ctx.labels_hash,
         "input_hash": ctx.input_hash,
         "llm_mode": ctx.llm_mode,
         "outputs": [str(p) for p in result.get("outputs", [])],

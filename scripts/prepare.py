@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import runpy
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -39,6 +40,8 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
                    help="skip script.yaml generation step")
     p.add_argument("--skip-ground-truth", action="store_true",
                    help="skip interactive ground-truth labeling")
+    p.add_argument("--skip-labels", action="store_true",
+                   help="skip interactive label-exclusion prompt")
     p.add_argument("--llm-mode", choices=["max", "api", "hybrid"], default="hybrid")
     p.add_argument("--budget-usd", type=float, default=10.0)
     p.add_argument("--input-dir", type=Path, default=REPO / "input")
@@ -58,6 +61,113 @@ def _build_ctx(ns: argparse.Namespace) -> Context:
         "--prompts-dir", str(ns.prompts_dir),
     ]
     return Context.from_args(argv)
+
+
+def _parse_indices(raw: str, n: int) -> list[int]:
+    out: list[int] = []
+    seen: set[int] = set()
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if not tok.isdigit():
+            raise ValueError(f"not a number: {tok!r}")
+        i = int(tok)
+        if i < 1 or i > n:
+            raise ValueError(f"out of range 1..{n}: {i}")
+        if i in seen:
+            continue
+        seen.add(i)
+        out.append(i)
+    return out
+
+
+def _read_existing_labels(path: Path) -> frozenset[str]:
+    if not path.exists():
+        return frozenset()
+    names: set[str] = set()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        names.add(line)
+    return frozenset(names)
+
+
+def _step_select_excluded_labels(ctx: Context) -> None:
+    if not ctx.db_path.exists():
+        print(
+            f"[prepare] ERROR: {ctx.db_path} not found. Drop msgstore.db there first.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    uri = f"file:{ctx.db_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        rows = list(conn.execute(
+            "SELECT label_name FROM labels WHERE type = 0 "
+            "ORDER BY sort_id, label_name"
+        ))
+    finally:
+        conn.close()
+    names = [r[0] for r in rows if r[0]]
+    if not names:
+        print("[prepare] no user labels in DB — skipping label exclusion")
+        return
+
+    print("\n[prepare] User labels in msgstore.db:")
+    for i, n in enumerate(names, 1):
+        print(f"  {i:2d}. {n}")
+    print(
+        "\nWhich labels should be EXCLUDED from analysis?\n"
+        "Chats tagged with any selected label will be dropped from every stage.\n"
+    )
+    while True:
+        raw = input("Exclude which labels? (comma-sep nums, blank=none): ").strip()
+        try:
+            indices = _parse_indices(raw, len(names))
+            break
+        except ValueError as e:
+            print(f"  invalid: {e}. Try again.")
+
+    selected = sorted({names[i - 1] for i in indices})
+
+    labels_file = ctx.excluded_labels_path
+    existing = _read_existing_labels(labels_file)
+    if frozenset(selected) == existing:
+        print(f"[prepare] selection unchanged ({len(selected)} label(s)) — no-op")
+        return
+
+    if selected:
+        body_lines = [
+            "# excluded-labels.txt — labels whose chats are dropped from analysis.",
+            "# Regenerate via `scripts.prepare`. One label per line. `#` = comment.",
+            "",
+            *selected,
+            "",
+        ]
+    else:
+        body_lines = [
+            "# excluded-labels.txt — empty: no labels excluded.",
+            "",
+        ]
+    labels_file.parent.mkdir(parents=True, exist_ok=True)
+    labels_file.write_text("\n".join(body_lines), encoding="utf-8")
+    print(f"[prepare] wrote {labels_file} ({len(selected)} label(s))")
+
+    # Invalidate Stage 1 artifacts + all sentinels so pipeline reruns cleanly.
+    cleared: list[Path] = []
+    for rel in ("conversations.jsonl", "conversations_short.jsonl", "chat_labels.json"):
+        p = ctx.data_dir / rel
+        if p.exists():
+            p.unlink()
+            cleared.append(p)
+    for p in ctx.data_dir.glob("stage*.done"):
+        p.unlink()
+        cleared.append(p)
+    if cleared:
+        print(f"[prepare] invalidated {len(cleared)} artifact(s); Stage 1 will rerun")
 
 
 def _step_generate_script(ctx: Context, *, force: bool) -> None:
@@ -96,6 +206,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     ns = _parse_args(argv)
     ctx = _build_ctx(ns)
+
+    if not ns.skip_labels:
+        _step_select_excluded_labels(ctx)
+        # Re-build context so ctx.excluded_labels / labels_hash / input_hash
+        # reflect the freshly written file.
+        ctx = _build_ctx(ns)
 
     if not ns.skip_script:
         _step_generate_script(ctx, force=ns.force_script)

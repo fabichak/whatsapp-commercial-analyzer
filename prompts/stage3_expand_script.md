@@ -9,8 +9,7 @@ contradiga o script, apenas elementos faltantes ou refinamentos.
 O usuário fornece dois blocos:
 1. `script-comercial.md` — fonte livre, em PT-BR, com tabelas e emojis.
 2. `script.yaml` — índice canônico já extraído (steps 1, 2, 3, 3.5, 5,
-   6, 7, fup1, fup2; serviços; price_grid; additionals;
-   objection_taxonomy com 9 ids; promocoes).
+   6, 7, fup1, fup2; serviços; price_grid; additionals;objection_taxonomy com 9 ids; promocoes).
 
 ## Saída (estruturada — tool/JSON)
 
@@ -19,9 +18,7 @@ Retorne UM objeto com três chaves de topo: `day_spa_pitch`,
 
 ### 1. `day_spa_pitch`
 Re-estruture o pitch do Day Spa em fluxo encadeado. **NÃO invente**
-serviços ausentes; use escalda-pés, banho de imersão, massagem
-relaxante com pedras quentes, chás/frutas/castanhas, espumante
-(versões 3h/casal) que já estão no script.
+serviços ausentes; Os day-spas válidos estão no `script-comercial`. Alguns Day-Spas não estão no documento, mas a estrutura da mensagem é bem parecida (título, descrição de alguns serviços, comida)
 
 Formato:
 - `intro`: frase de abertura (1–2 linhas) apresentando a experiência.
@@ -64,4 +61,4 @@ nada encontrado. Máximo 10.
 - Tom: direto, acolhedor, sem clichês ("claro que sim!", "com
   certeza!", "é um prazer enorme" — já saturados no script base).
 - NÃO modifique nada em `script.yaml`; só adicione.
-- NÃO use mais que 8000 tokens de saída.
+- NÃO use mais que 20000 tokens de saída.

@@ -29,7 +29,9 @@ def _clean_text(t: str) -> str:
 
 
 def _fetch_rows(
-    conn: sqlite3.Connection, phones: frozenset[str] | None
+    conn: sqlite3.Connection,
+    phones: frozenset[str] | None,
+    excluded_labels: frozenset[str] = frozenset(),
 ) -> list[sqlite3.Row]:
     base = (
         "SELECT m._id AS msg_id, m.chat_row_id AS chat_row_id, "
@@ -45,8 +47,78 @@ def _fetch_rows(
         placeholders = ",".join("?" for _ in phones)
         base += f" AND j.user IN ({placeholders})"
         params = tuple(sorted(phones))
+    if excluded_labels:
+        lbl_placeholders = ",".join("?" for _ in excluded_labels)
+        base += (
+            " AND c.jid_row_id NOT IN ("
+            "SELECT lj.jid_row_id FROM labeled_jid lj "
+            "JOIN labels l ON lj.label_id = l._id "
+            f"WHERE l.type = 0 AND l.label_name IN ({lbl_placeholders}))"
+        )
+        params = params + tuple(sorted(excluded_labels))
     base += " ORDER BY c._id ASC, m.timestamp ASC, m._id ASC"
     return list(conn.execute(base, params))
+
+
+def _fetch_chat_labels(
+    conn: sqlite3.Connection, kept_phones: set[str]
+) -> dict[str, list[str]]:
+    if not kept_phones:
+        return {}
+    out: dict[str, set[str]] = {}
+    phones = sorted(kept_phones)
+    # chunk IN(...) to avoid SQLite variable limit
+    CHUNK = 500
+    for i in range(0, len(phones), CHUNK):
+        sub = phones[i : i + CHUNK]
+        placeholders = ",".join("?" for _ in sub)
+        q = (
+            "SELECT j.user AS phone, l.label_name AS label_name "
+            "FROM labeled_jid lj "
+            "JOIN jid j ON lj.jid_row_id = j._id "
+            "JOIN labels l ON lj.label_id = l._id "
+            f"WHERE l.type = 0 AND j.user IN ({placeholders})"
+        )
+        for r in conn.execute(q, tuple(sub)):
+            phone = r["phone"] or ""
+            if not phone:
+                continue
+            out.setdefault(phone, set()).add(r["label_name"])
+    return {p: sorted(s) for p, s in out.items()}
+
+
+def _count_excluded_chats(
+    conn: sqlite3.Connection, excluded_labels: frozenset[str]
+) -> int:
+    if not excluded_labels:
+        return 0
+    placeholders = ",".join("?" for _ in excluded_labels)
+    q = (
+        "SELECT COUNT(DISTINCT c._id) FROM chat c "
+        "JOIN labeled_jid lj ON lj.jid_row_id = c.jid_row_id "
+        "JOIN labels l ON lj.label_id = l._id "
+        f"WHERE c.group_type = 0 AND l.type = 0 AND l.label_name IN ({placeholders})"
+    )
+    row = conn.execute(q, tuple(sorted(excluded_labels))).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _warn_missing_labels(
+    conn: sqlite3.Connection, excluded_labels: frozenset[str]
+) -> None:
+    if not excluded_labels:
+        return
+    rows = conn.execute(
+        "SELECT label_name FROM labels WHERE type = 0"
+    ).fetchall()
+    present = {r[0] for r in rows}
+    missing = sorted(excluded_labels - present)
+    if missing:
+        log.warning(
+            "excluded_labels: %d name(s) not found in DB: %s",
+            len(missing),
+            missing,
+        )
 
 
 def _build_conversation(chat_row_id: int, rows: list[sqlite3.Row]) -> Conversation:
@@ -83,17 +155,32 @@ def run(ctx: Context) -> dict:
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        rows = _fetch_rows(conn, ctx.phones_filter)
+        _warn_missing_labels(conn, ctx.excluded_labels)
+        excluded_chats_count = _count_excluded_chats(conn, ctx.excluded_labels)
+        rows = _fetch_rows(conn, ctx.phones_filter, ctx.excluded_labels)
+
+        grouped: dict[int, list[sqlite3.Row]] = {}
+        for r in rows:
+            grouped.setdefault(int(r["chat_row_id"]), []).append(r)
+
+        kept_phones = {
+            (rs[0]["phone"] or "") for rs in grouped.values() if rs
+        }
+        kept_phones.discard("")
+        chat_labels = _fetch_chat_labels(conn, kept_phones)
     finally:
         conn.close()
 
-    grouped: dict[int, list[sqlite3.Row]] = {}
-    for r in rows:
-        grouped.setdefault(int(r["chat_row_id"]), []).append(r)
-
     long_path = ctx.data_dir / "conversations.jsonl"
     short_path = ctx.data_dir / "conversations_short.jsonl"
+    chat_labels_path = ctx.data_dir / "chat_labels.json"
     outputs: list[Path] = []
+
+    chat_labels_path.parent.mkdir(parents=True, exist_ok=True)
+    chat_labels_path.write_text(
+        json.dumps(chat_labels, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
     if ctx.phones_filter is not None:
         matched_phones = {
@@ -142,10 +229,40 @@ def run(ctx: Context) -> dict:
             len(short_convos),
         )
 
+    outputs.append(chat_labels_path)
+
+    # Count kept long chats for reporting.
+    if ctx.phones_filter is not None:
+        kept_chats_count = len(grouped)
+    else:
+        kept_chats_count = sum(
+            1 for rs in grouped.values() if len(rs) >= MIN_MESSAGES
+        )
+        if ctx.chat_limit is not None:
+            kept_chats_count = min(kept_chats_count, ctx.chat_limit)
+
+    summary_path = ctx.data_dir / "stage1_summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "excluded_labels": sorted(ctx.excluded_labels),
+                "excluded_chats_count": excluded_chats_count,
+                "kept_chats_count": kept_chats_count,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    outputs.append(summary_path)
+
     return {
         "stage": 1,
         "outputs": outputs,
         "llm_usd_max": 0.0,
         "llm_usd_api": 0.0,
         "elapsed_s": time.time() - t0,
+        "excluded_chats_count": excluded_chats_count,
+        "kept_chats_count": kept_chats_count,
+        "excluded_labels": sorted(ctx.excluded_labels),
     }

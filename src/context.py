@@ -50,11 +50,33 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def compute_input_hash(db_path: Path, script_md: Path, script_yaml: Path) -> str:
+def _load_excluded_labels(path: Path) -> tuple[frozenset[str], str]:
+    if not path.exists():
+        return frozenset(), "none"
+    names: set[str] = set()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        names.add(line)
+    if not names:
+        return frozenset(), "none"
+    frozen = frozenset(names)
+    h = hashlib.sha256(",".join(sorted(frozen)).encode("utf-8")).hexdigest()[:16]
+    return frozen, h
+
+
+def compute_input_hash(
+    db_path: Path,
+    script_md: Path,
+    script_yaml: Path,
+    labels_hash: str = "none",
+) -> str:
     parts = [
         f"db={_hash_file(db_path)}",
         f"md={_hash_file(script_md)}",
         f"yaml={_hash_file(script_yaml)}",
+        f"labels={labels_hash}",
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
@@ -72,6 +94,9 @@ class Context:
     chat_limit: Optional[int] = None
     phones_filter: Optional[frozenset[str]] = None
     phones_hash: Optional[str] = None
+    excluded_labels: frozenset[str] = field(default_factory=frozenset)
+    labels_hash: str = "none"
+    excluded_labels_path: Optional[Path] = None
     llm_mode: LlmMode = "hybrid"
     budget_usd: float = 10.0
     force: bool = False
@@ -82,9 +107,18 @@ class Context:
     def __post_init__(self) -> None:
         if self.script_yaml_path is None:
             self.script_yaml_path = self.input_dir / "script.yaml"
+        if self.excluded_labels_path is None:
+            self.excluded_labels_path = self.input_dir / "excluded-labels.txt"
+        if not self.excluded_labels and self.labels_hash == "none":
+            self.excluded_labels, self.labels_hash = _load_excluded_labels(
+                self.excluded_labels_path
+            )
         if self.input_hash is None:
             self.input_hash = compute_input_hash(
-                self.db_path, self.script_path, self.script_yaml_path
+                self.db_path,
+                self.script_path,
+                self.script_yaml_path,
+                self.labels_hash,
             )
 
     @classmethod
@@ -136,7 +170,12 @@ class Context:
         ns.data_dir.mkdir(parents=True, exist_ok=True)
         ns.output_dir.mkdir(parents=True, exist_ok=True)
 
-        input_hash = compute_input_hash(db_path, script_path, script_yaml)
+        excluded_labels_path = ns.input_dir / "excluded-labels.txt"
+        excluded_labels, labels_hash = _load_excluded_labels(excluded_labels_path)
+
+        input_hash = compute_input_hash(
+            db_path, script_path, script_yaml, labels_hash
+        )
 
         restart = ns.restart or ns.force
         client = None
@@ -157,6 +196,9 @@ class Context:
             chat_limit=ns.chat_limit,
             phones_filter=phones_filter,
             phones_hash=phones_hash,
+            excluded_labels=excluded_labels,
+            labels_hash=labels_hash,
+            excluded_labels_path=excluded_labels_path,
             llm_mode=ns.llm_mode,
             budget_usd=ns.budget_usd,
             force=ns.force,

@@ -1,124 +1,37 @@
-# SCRIPT DE ATENDIMENTO PRIMEIRO CONTATO (1C)      *(Passo a passo | Humanizado | Conversacional)*
-
-# 0: PROMOÇÕES
-
-## Promoções de dia das mães
-
-**Vendas de 16/04 À 17.05**. **Todas as vendas podem ser usadas até 31.06.**
-
--  Massagem especial: Massagem relaxante \+ aromaterapia \+ hidratação facial.  De R$285 por R$255.  
--  Ritual de Renovação: 4 massagens, todas com pedras quentes, por R$790. De segunda a quinta por R$695  
--  Day-spa 3 horas individual por R$740: Day-spa normal \+ Revitalização facial \+ Vela e Voucher físico de presente (para retirar no spa)  
--  Day-spa 3 horas casal (mãe e filho/filha) por R$1250: Day-spa normal \+ Revitalização facial \+ Vela e Voucher físico de presente (para retirar no spa)
-
-**Podemos descontar 5%, SE O CLIENTE PEDIR e se for de segunda a quinta a marcação. Se não souber a data exata, não tem desconto.**  
-**NUNCA ofereça desconto se o cliente não pedir.**
-
-# 
-
-# 0: PREÇOS E REGRAS
-
-| Procedimento | Preço (em reais) | Regras |
-| :---- | :---- | :---- |
-| Massagens | 200 | 1x no cartão normal \> 1: repassando taxas 2.5% de desconto no pix SE PEDIREM |
-| Mini-day spa (2 horas): individual  | 420 | 1 e 2x no cartão normal \> 2: repassando taxas 3% de desconto no pix SE PEDIREM |
-| Mini-day spa (2 horas): 2 pessoas | 830 | 1 e 2x no cartão normal \> 2: repassando taxas 3% de desconto no pix SE PEDIREM |
-| Mini-day spa (2 horas): 3 pessoas | 1134 | 1 e 2x no cartão normal \> 2: repassando taxas 3% de desconto no pix SE PEDIREM |
-| Mini-day spa (2 horas): 4 pessoas | 1512 | 1 e 2x no cartão normal \> 2: repassando taxas 5% de desconto no pix SE PEDIREM |
-| Mini-day spa (2 horas): 5 pessoas | 1890  | 1 e 2x no cartão normal \> 2: repassando taxas 5% de desconto no pix SE PEDIREM |
-| Mini-day spa (2 horas): 6 pessoas | 2268 | 1 e 2x no cartão normal \> 2: repassando taxas 5% de desconto no pix SE PEDIREM |
-| Day spa (3 horas): individual | 630 | 1 e 2x no cartão normal \> 2: repassando taxas 3% de desconto no pix SE PEDIREM |
-| Day spa (3 horas): 2 pessoas | 1140 | 1 e 2x no cartão normal \> 2: repassando taxas 3% de desconto no pix SE PEDIREM |
-| Day spa (3 horas): 3 pessoas | 1700 | 1 e 2x no cartão normal \> 2: repassando taxas 3% de desconto no pix SE PEDIREM |
-| Day spa (3 horas): 4 pessoas | 2268 | 1 e 2x no cartão normal \> 2: repassando taxas 5% de desconto no pix SE PEDIREM |
-| Day spa (3 horas): 5 pessoas | 2835 | 1 e 2x no cartão normal \> 2: repassando taxas 5% de desconto no pix SE PEDIREM |
-| Day spa (3 horas): 6 pessoas | 3402 | 1 e 2x no cartão normal \> 2: repassando taxas 5% de desconto no pix SE PEDIREM |
-
-## Adicionais
-
-| Pedras quentes | 25 |
-| :---- | :---- |
-| Ventosas | 25 |
-| Esfoliação corporal | 35 |
-| Hidratação dos pés | 25 |
-| Hidratação corporal e facial | 50 |
-| Revitalização facial | 70 |
-| Aromaterapia | 35 |
-| Ducha  | 30 |
-
-## Regras gerais de negociação
-
-- NUNCA ofereça desconto sem a pessoa pedir  
-- Pode oferecer \+ 5% desconto para segunda, terça e quarta para day-spa (**massagens não**)  
-- Não passe NENHUM preço antes da pessoa pedir
-
-## 
-
-## Regras de comunicação
-
-- Não faça alterações do script nesse documento  
-- Altere o script da maneira que você achar conveniente, mas siga a lógica: não escreva nem fale TUDO. Tente conduzir para entender o que o cliente quer  
-- Não deixe o cliente sem responder. Mesmo que ele fale algo do tipo (Vou pensar), sempre mande a última mensagem, mesmo que seja um “até breve” ou “estamos à disposição”.  
-- Esteja sempre atento para oferecer massagens para quem procura day-spa e day-spa para quem procura massagens. Às vezes a pessoa só viu 1 ad e não sabe o que oferecemos  
-- SEMPRE ofereça adicionais, MESMO PARA DAY SPA (especialmente aromaterapia)  
-- Se for homem e estiver achando uma conversa estranha, passe para Gabriela ou Martin. Não tenha medo de ser curto e grosso se achar que o cara quer finalização. Por exemplo, se pedir foto da massagem, já manda logo um: “Não oferecemos fotos. Nossas terapias não são sensuais e não tem toques na genitália. Todas nossas massagistas tem extrema experiência e confiamos em todas para fazer um excelente trabalho.”  
-- Cuidado para não ser técnico demais. Nunca fale muito sobre músculos, métodos. O cliente quer uma resolução de problema, não COMO você resolve o problema.
-
 # 1:   SAUDAÇÃO E ACOLHIMENTO
 
 Olá\! Bom dia 😊
-
 Tudo bem?
-
 Seja muito bem-vinda(o) ao Puris SPA ✨
-
 É um prazer enorme te receber por aqui.
-
 Como você se chama, por favor?
+
+OU
 
 Olá\! Boa tarde 😊
-
 Tudo bem?
-
 Seja muito bem-vinda(o) ao Puris SPA ✨
-
 É um prazer enorme te receber por aqui.
-
 Como você se chama, por favor?
-
 Olá\! Boa noite 😊
 
 Tudo bem?
-
 Seja muito bem-vinda(o) ao Puris SPA ✨
-
 É um prazer enorme te receber por aqui.
-
 Como você se chama, por favor?
 
-# 
-
 #  2 : CONEXÃO \+ QUALIFICAÇÃO
-
 Muito prazer,  **\[nome da cliente\]**.
 
 Meu nome é **\[seu nome\]**.  
 Para que eu possa te ajudar da melhor maneira, conte um pouquinho… O que você sente que seu corpo está pedindo hoje? Vamos escolher algo que combine com o seu momento.
 
-# 
 
 # 3:  VALIDAÇÃO \+ PROXIMIDADE
-
-(Após a cliente explicar o objetivo)
-
 Perfeito, **\[nome da cliente\]**, obrigada por compartilhar comigo 💫
 
 Pelo que você me contou, acredito que uma ótima opção para você seja a **\[nome do serviço indicado\]**.  
 Vou te explicar como ela funciona:
-
-#  **3.5**:  APRESENTAÇÃO DOS SERVIÇOS
-
-Imediatamente depois do 3
 
 💆‍Massagem Relaxante
 
@@ -162,32 +75,20 @@ A massagem facial atua nos músculos da face, couro cabeludo, pescoço e ATM.
 
 ---
 
-# 🌸 Shiatsu
+🌸 Shiatsu
 
-# O Shiatsu é uma terapia oriental realizada com pressões ao longo dos meridianos do corpo.
+O Shiatsu é uma terapia oriental realizada com pressões ao longo dos meridianos do corpo.
 
-# Seu objetivo é equilibrar a energia vital, aliviar dores e promover bem-estar físico e emocional
+Seu objetivo é equilibrar a energia vital, aliviar dores e promover bem-estar físico e emocional
 
-# ---
+ ---
 
 # **5:**  CONDUÇÃO PARA PERSONALIZAÇÃO (CHAVE DE CONVERSÃO)
+Para deixar sua experiência ainda mais completa, você pode escolher alguns adicionais, de acordo com o que mais combina com você 💆‍♀️✨
 
-(**Depois que a pessoa demonstrou interesse em agendar**.)
+Você prefere algo mais relaxante, estético ou terapêutico?
 
----
-
-# Para deixar sua experiência ainda mais completa, você pode escolher alguns adicionais, de acordo com o que mais combina com você 💆‍♀️✨
-
-# Você prefere algo mais relaxante, estético ou terapêutico?
-
-# 
-
-**Para dores:**
-
-# **6:** VALORES DOS ADICIONAIS
-
-(Enviar somente após a cliente demonstrar interesse, Enviar dependendo da massagem)
-
+#**6:** VALORES DOS ADICIONAIS
 ---
 
 ## Massagem Relaxante
@@ -202,8 +103,6 @@ Para um efeito ainda mais relaxante, as clientes costumam amar:
 E se quiser, pode fazer ao final da massagem uma ducha lá no spa com tudo que você precisa por R$30,00
 
 Você sente que algum desses combina com o seu momento hoje? 
-
-### 
 
 ### Estético
 
@@ -249,8 +148,6 @@ Para um efeito ainda mais relaxante, as clientes costumam amar:
 E se quiser, pode fazer ao final da massagem uma ducha lá no spa com tudo que você precisa por R$30,00
 
 Você sente que algum desses combina com o seu momento hoje? 
-
-### 
 
 ### Estético
 
@@ -465,35 +362,21 @@ Você sente que algum desses faz sentido pra você hoje?
 
 ---
 
-## Valores
-
-( Só fale de valores se o cliente perguntar ou demonstrar interesse claro.)
+## Valores de adicionais
+(Só fale de valores se o cliente perguntar ou demonstrar interesse claro.)
 
 O valor do \[adicional\] é \[valor\].
-
 Quer incluir esse na sua experiência?
 
-### Valores
-
 • Pedras quentes que promovem relaxamento profundo da musculatura – R$25
-
 • Ventosas para auxiliar no alívio de tensões profundas – R$25
-
 • Esfoliação corporal para deixar a pele renovada e macia – R$25
-
 • Hidratação dos pés para devolver maciez e proporcionar conforto a cada passo – R$25
-
 • Hidratação corporal e facial – R$50
-
 • Revitalização facial para a pele do rosto ficar ainda brilhante – R$70
-
 • Aromaterapia para ajudar a desacelerar e acalmar a mente – R$35
-
 • Ducha – R$30
 
-# 
-
-## Day Spa
 
 # Day Spa
 
@@ -554,24 +437,17 @@ Incluso: chás, frutas, castanhas e espumante.
 Perfeito, **\[nome da cliente\]** ✨  
 Posso verificar os melhores horários disponíveis pra você e já deixar tudo preparado para que sua experiência no Puris SPA seja inesquecível 💛
 
-# 
-
-# 
 
 # **FOLLOW UPS**
-
 ## FUP 1: SUAVE E NATURAL (2-3h)
 
-### CAT 1: Parou de responder
-
-Olá \[nome\]\!  
+### CATEGORIA 1: Parou de responder
+Olá \[nome\]\! 
 Passei só pra saber se consegui ver minha mensagem?  
 Fico por aqui caso queira tirar alguma dúvida 
 
 ## FUP 2: – ACOLHEDOR \+ DIRECIONAMENTO (24h-\>48h)
-
-### CAT 1: Parou de responder
-
+### CATEGORIA 1: Parou de responder
 Versão Leve e Elegante
 
 Olá \[nome\], tudo bem?  
@@ -597,15 +473,13 @@ Essa semana abrimos alguns horários especiais e lembrei de você
 
 Se quiser, posso te enviar as opções antes de liberar na agenda geral 
 
-### 
-
-### CAT 2: Vou ver e te respondo
+### CATEGORIA 2: Vou ver e te respondo
 
 Olá \[nome\], tudo bem?  
 Estamos com alguns horários abertos ainda esta semana\! (CUIDADO: DAY SPA OU PRESENTE)  
 Só passando para confirmar se você conseguiu pensar na minha proposta? 
 
-### CAT 3: Achou caro, não conseguimos convencer
+### CATEGORIA 3: Achou caro, não conseguimos convencer
 
 **SÓ PRA MASSAGEM**
 

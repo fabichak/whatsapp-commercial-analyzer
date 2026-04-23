@@ -41,11 +41,11 @@ SECTION_HEADERS = [
 CSV_FILES: dict[str, list[str]] = {
     "turnarounds.csv": [
         "telefone", "data", "tipo_objecao",
-        "mensagem_cliente", "resposta_vencedora", "confirmacao",
+        "mensagem_cliente", "resposta_vencedora", "confirmacao", "labels",
     ],
     "lost_deals.csv": [
         "telefone", "data", "tipo_objecao",
-        "mensagem_cliente", "resposta_vencedora", "confirmacao",
+        "mensagem_cliente", "resposta_vencedora", "confirmacao", "labels",
     ],
     "per_step.csv": [
         "step_id", "on_script_count", "off_script_count",
@@ -115,6 +115,26 @@ def _score_template(tpl: dict, sent: dict | None) -> float:
     return pol * tpl.get("instance_count", 0) * sent.get("warmth", 0)
 
 
+def _load_chat_labels(ctx: Context) -> dict[str, list[str]]:
+    p = ctx.data_dir / "chat_labels.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _read_stage1_summary(ctx: Context) -> dict:
+    p = ctx.data_dir / "stage1_summary.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 def _build_prompt_payload(ctx: Context) -> dict:
     d = ctx.data_dir
 
@@ -142,13 +162,21 @@ def _build_prompt_payload(ctx: Context) -> dict:
 
     top_turnarounds = turnarounds[:20]
 
+    stage1 = _read_stage1_summary(ctx)
+    excluded_labels = stage1.get("excluded_labels", sorted(ctx.excluded_labels))
+    excluded_chats_count = stage1.get("excluded_chats_count", 0)
+    kept_chats_count = stage1.get("kept_chats_count", len(conversions))
+
     return {
         "volumes": {
             "conversations": len(conversions),
             "templates": len(templates),
             "turnarounds": len(turnarounds),
             "lost_deals": len(lost_deals),
+            "excluded_chats_count": excluded_chats_count,
+            "kept_chats_count": kept_chats_count,
         },
+        "excluded_labels": excluded_labels,
         "per_step": aggregations.get("per_step", {}),
         "off_script_clusters_global": aggregations.get("off_script_clusters", []),
         "top_positive_templates": scored_pos,
@@ -168,7 +196,8 @@ def _write_csvs(ctx: Context,
                 lost_deals: list[dict],
                 aggregations: dict,
                 templates: list[dict],
-                sent_by_id: dict) -> list[Path]:
+                sent_by_id: dict,
+                chat_labels: dict[str, list[str]]) -> list[Path]:
     out_dir = ctx.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
@@ -182,13 +211,16 @@ def _write_csvs(ctx: Context,
         paths.append(p)
 
     def _turn_row(t: dict) -> list:
+        phone = t.get("phone", "")
+        labels = chat_labels.get(phone, [])
         return [
-            t.get("phone", ""),
+            phone,
             t.get("date", ""),
             t.get("objection_type", ""),
             t.get("customer_message", ""),
             t.get("winning_reply", ""),
             t.get("confirmation", ""),
+            ";".join(labels),
         ]
 
     _write("turnarounds.csv", CSV_FILES["turnarounds.csv"], [_turn_row(t) for t in turnarounds])
@@ -247,8 +279,21 @@ def run(ctx: Context) -> dict:
     payload = _build_prompt_payload(ctx)
     system = _prompt_text(ctx)
 
+    excl = payload.get("excluded_labels") or []
+    excl_count = payload.get("volumes", {}).get("excluded_chats_count", 0)
+    if excl:
+        filtro = (
+            f"Análise filtrou {excl_count} conversa(s) rotulada(s) como: "
+            + ", ".join(excl)
+            + ". Mencione esse filtro na Seção 1 (Resumo executivo)."
+        )
+    else:
+        filtro = "Nenhum label de chat foi excluído da análise."
+
     user_msg = (
         "Dados agregados da análise (JSON). Se um bloco vier vazio, marque a seção correspondente como `(sem dados — stub)`.\n\n"
+        + filtro
+        + "\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
 
@@ -282,7 +327,10 @@ def run(ctx: Context) -> dict:
     templates = _load_json(d / "spa_templates.json")
     sentiments = _load_json(d / "template_sentiment.json")
     sent_by_id = {s["template_id"]: s for s in sentiments}
-    csv_paths = _write_csvs(ctx, turnarounds, lost_deals, aggregations, templates, sent_by_id)
+    chat_labels = _load_chat_labels(ctx)
+    csv_paths = _write_csvs(
+        ctx, turnarounds, lost_deals, aggregations, templates, sent_by_id, chat_labels
+    )
 
     cost_after = 0.0
     if ctx.client is not None:
