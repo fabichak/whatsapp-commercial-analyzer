@@ -638,6 +638,13 @@ class ClaudeClient:
                     raise
                 time.sleep(delay)
                 delay *= 2
+            except SchemaError:
+                # LLM sometimes returns malformed JSON (unescaped quotes, code fences).
+                # Retry a few times — regeneration is stochastic and usually succeeds.
+                if attempt >= max_attempts:
+                    raise
+                time.sleep(delay)
+                delay *= 2
 
     # ---------- dispatcher ----------
 

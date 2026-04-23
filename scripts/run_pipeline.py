@@ -260,6 +260,27 @@ def _sweep_stray_claude_at_startup() -> None:
         print(f"[pipeline] stray claude sweep skipped: {e}", file=sys.stderr)
 
 
+def check_prepare_artifacts(ctx: Context) -> None:
+    """Fail fast if pre-step artifacts are missing.
+
+    `input/script.yaml` and `data/ground_truth_outcomes.csv` are produced by
+    `scripts.prepare`. Pipeline refuses to run without them.
+    """
+    missing: list[str] = []
+    if not ctx.script_yaml_path.exists():
+        missing.append(str(ctx.script_yaml_path))
+    gt = ctx.data_dir / "ground_truth_outcomes.csv"
+    if not gt.exists():
+        missing.append(str(gt))
+    if missing:
+        sys.stderr.write(
+            "Missing prerequisite files:\n"
+            + "".join(f"  - {p}\n" for p in missing)
+            + "Run: uv run python -m scripts.prepare\n"
+        )
+        sys.exit(2)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     _sweep_stray_claude_at_startup()
@@ -273,6 +294,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     pre_ns, _ = pre.parse_known_args(list(argv) if argv is not None else None)
 
     ctx = Context.from_args(argv)
+    check_prepare_artifacts(ctx)
     stages = select_stages(pre_ns.stage, pre_ns.from_stage, pre_ns.to_stage)
     run_pipeline(ctx, stages)
     return 0

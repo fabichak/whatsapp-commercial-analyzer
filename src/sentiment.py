@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from tqdm import tqdm
 
 from src.context import Context
+from src.exceptions import SchemaError
 from src.schemas import SpaTemplate, TemplateSentiment
 
 log = logging.getLogger(__name__)
@@ -132,13 +133,24 @@ def score_templates(ctx: Context) -> list[TemplateSentiment]:
 
     for batch in tqdm(batches, desc="stage5: sentiment batches", disable=None):
         user_msg = _build_user_msg(batch)
-        result = ctx.client.complete(
-            model=MODEL,
-            messages=[{"role": "user", "content": user_msg}],
-            system=system,
-            max_tokens=BATCH_MAX_TOKENS,
-            response_format=SentimentBatchResult,
-        )
+        last_err: Exception | None = None
+        result = None
+        for attempt in range(5):
+            try:
+                result = ctx.client.complete(
+                    model=MODEL,
+                    messages=[{"role": "user", "content": user_msg}],
+                    system=system,
+                    max_tokens=BATCH_MAX_TOKENS,
+                    response_format=SentimentBatchResult,
+                )
+                break
+            except SchemaError as e:
+                last_err = e
+                log.warning("stage5: SchemaError attempt %d — retrying", attempt + 1)
+        if result is None:
+            log.error("stage5: skipping batch after 5 schema failures: %s", last_err)
+            continue
         if not isinstance(result, SentimentBatchResult):
             raise TypeError(f"expected SentimentBatchResult, got {type(result).__name__}")
         expected = {it["template_id"] for it in batch}
