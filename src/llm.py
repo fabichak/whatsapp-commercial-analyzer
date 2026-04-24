@@ -195,7 +195,7 @@ class MaxClient:
         self._sdk = claude_agent_sdk
         self._oneshot = os.environ.get("CLAUDE_MAX_ONESHOT", "") == "1"
         self._cli_path = _find_bundled_cli() if self._oneshot else None
-        self._timeout_s = float(os.environ.get("CLAUDE_MAX_TIMEOUT_S", "120"))
+        self._timeout_s = float(os.environ.get("CLAUDE_MAX_TIMEOUT_S", "300"))
         self._kill_others = os.environ.get("CLAUDE_MAX_KILL_OTHERS", "") == "1"
         self._kill_lock = None  # lazy init (threading import)
 
@@ -416,11 +416,22 @@ class MaxClient:
                 "(no prose, no code fences):\n" + schema_json
             )
 
+        stderr_lines: list[str] = []
+
+        def _stderr_cb(line: str) -> None:
+            stderr_lines.append(line)
+            sys.stderr.write(f"[claude-cli] {line}\n")
+            sys.stderr.flush()
+
         options = ClaudeAgentOptions(
             model=model,
             system_prompt=system or None,
             max_turns=1,
             allowed_tools=[],
+            tools=[],
+            mcp_servers={},
+            setting_sources=[],
+            stderr=_stderr_cb,
         )
 
         text_out = ""
@@ -446,9 +457,14 @@ class MaxClient:
         try:
             anyio.run(_run)
         except Exception as e:
-            msg = str(e).lower()
+            stderr_blob = "\n".join(stderr_lines[-40:])
+            msg = (str(e) + "\n" + stderr_blob).lower()
             if ("rate" in msg and "limit" in msg) or "quota" in msg or "exhaust" in msg:
                 raise MaxRateLimitError(message=str(e)) from e
+            if stderr_blob:
+                raise RuntimeError(
+                    f"{e}\n--- claude-agent-sdk stderr ---\n{stderr_blob}"
+                ) from e
             raise
 
         delta = UsageDelta(

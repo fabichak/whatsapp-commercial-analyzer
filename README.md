@@ -31,7 +31,7 @@ uv sync
 uv run python -m scripts.prepare
 
 # 5. Run the 8-stage pipeline
-uv run python -m scripts.run_pipeline --budget-usd 5.00
+uv run python -m scripts.run_pipeline --budget-usd 10.00
 
 # 6. Read output/report.md + output/*.csv
 ```

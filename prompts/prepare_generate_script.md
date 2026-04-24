@@ -33,14 +33,34 @@ promocoes: {}         # promoções — livre
 
 objection_taxonomy:
   - id: "price"
+    name_pt: "<rótulo curto em PT-BR>"
+    triggers:
+      - "<frase/palavra-chave típica do cliente>"
+  # ... demais ids abaixo, cada um com name_pt + triggers (>=1)
   - id: "location"
+    name_pt: "..."
+    triggers: ["..."]
   - id: "time_slot"
+    name_pt: "..."
+    triggers: ["..."]
   - id: "competitor"
+    name_pt: "..."
+    triggers: ["..."]
   - id: "hesitation_vou_pensar"
+    name_pt: "..."
+    triggers: ["..."]
   - id: "delegated_talk_to_someone"
+    name_pt: "..."
+    triggers: ["..."]
   - id: "delayed_response_te_falo"
+    name_pt: "..."
+    triggers: ["..."]
   - id: "trust_boundary_male"
+    name_pt: "..."
+    triggers: ["..."]
   - id: "other"
+    name_pt: "..."
+    triggers: ["..."]
 ```
 
 ## Regras obrigatórias
@@ -50,7 +70,10 @@ objection_taxonomy:
    `"7"`, `"fup1"`, `"fup2"`. Use os nomes/etapas do script real para
    preencher `name` e `canonical_texts`. Etapas extras são permitidas.
 2. **`objection_taxonomy` deve conter exatamente os 9 ids listados
-   acima**, todos presentes, sem duplicatas, sem ids extras.
+   acima**, todos presentes, sem duplicatas, sem ids extras. Cada entrada
+   precisa de `name_pt` (string) e `triggers` (lista com >=1 frase/palavra
+   típica do cliente que dispara a objeção — inferir do script quando não
+   explícito).
 3. Cada step precisa de pelo menos um `canonical_texts` e pelo menos um
    `expected_customer_intents`. Se o script não especifica, infira do
    contexto.

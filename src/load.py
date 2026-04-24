@@ -53,9 +53,9 @@ def _fetch_rows(
             " AND c.jid_row_id NOT IN ("
             "SELECT lj.jid_row_id FROM labeled_jid lj "
             "JOIN labels l ON lj.label_id = l._id "
-            f"WHERE l.type = 0 AND l.label_name IN ({lbl_placeholders}))"
+            f"WHERE l.type = 0 AND TRIM(l.label_name) IN ({lbl_placeholders}))"
         )
-        params = params + tuple(sorted(excluded_labels))
+        params = params + tuple(sorted(n.strip() for n in excluded_labels))
     base += " ORDER BY c._id ASC, m.timestamp ASC, m._id ASC"
     return list(conn.execute(base, params))
 
@@ -97,9 +97,9 @@ def _count_excluded_chats(
         "SELECT COUNT(DISTINCT c._id) FROM chat c "
         "JOIN labeled_jid lj ON lj.jid_row_id = c.jid_row_id "
         "JOIN labels l ON lj.label_id = l._id "
-        f"WHERE c.group_type = 0 AND l.type = 0 AND l.label_name IN ({placeholders})"
+        f"WHERE c.group_type = 0 AND l.type = 0 AND TRIM(l.label_name) IN ({placeholders})"
     )
-    row = conn.execute(q, tuple(sorted(excluded_labels))).fetchone()
+    row = conn.execute(q, tuple(sorted(n.strip() for n in excluded_labels))).fetchone()
     return int(row[0]) if row else 0
 
 
@@ -111,8 +111,9 @@ def _warn_missing_labels(
     rows = conn.execute(
         "SELECT label_name FROM labels WHERE type = 0"
     ).fetchall()
-    present = {r[0] for r in rows}
-    missing = sorted(excluded_labels - present)
+    present = {(r[0] or "").strip() for r in rows}
+    wanted = {n.strip() for n in excluded_labels}
+    missing = sorted(wanted - present)
     if missing:
         log.warning(
             "excluded_labels: %d name(s) not found in DB: %s",
