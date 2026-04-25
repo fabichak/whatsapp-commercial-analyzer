@@ -19,5 +19,6 @@ Regras:
 - Não invente números. Use só o que está nos dados JSON fornecidos.
 - Na §5, se houver turnarounds, liste um por linha com `telefone`, data, tipo de objeção, trecho da mensagem do cliente, resposta vencedora, confirmação.
 - Na §2, percorra `per_step` ordenado por `step_id`. Se vazio, escreva `(sem dados — stub)`.
+- Se houver filtro de data inicial (mensagem a partir de DD/MM/YYYY) informado no contexto, registre-o explicitamente no início da §1 (Resumo executivo), em uma frase curta indicando o período coberto.
 - Sem preâmbulo, sem "claro!", sem "segue o relatório". Comece direto no `## 1. Resumo executivo`.
 - Sem código markdown (``` blocos), exceto se citar mensagens textuais.

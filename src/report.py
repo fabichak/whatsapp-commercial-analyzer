@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from src.context import Context
+from src.context import Context, format_iso_as_dmy
 from src.schemas import (
     Aggregation,
     ConversationConversion,
@@ -166,6 +166,7 @@ def _build_prompt_payload(ctx: Context) -> dict:
     excluded_labels = stage1.get("excluded_labels", sorted(ctx.excluded_labels))
     excluded_chats_count = stage1.get("excluded_chats_count", 0)
     kept_chats_count = stage1.get("kept_chats_count", len(conversions))
+    from_date = stage1.get("from_date") or ctx.from_date
 
     return {
         "volumes": {
@@ -176,6 +177,7 @@ def _build_prompt_payload(ctx: Context) -> dict:
             "excluded_chats_count": excluded_chats_count,
             "kept_chats_count": kept_chats_count,
         },
+        "from_date": from_date,
         "excluded_labels": excluded_labels,
         "per_step": aggregations.get("per_step", {}),
         "off_script_clusters_global": aggregations.get("off_script_clusters", []),
@@ -290,9 +292,21 @@ def run(ctx: Context) -> dict:
     else:
         filtro = "Nenhum label de chat foi excluído da análise."
 
+    from_date_iso = payload.get("from_date")
+    if from_date_iso:
+        filtro_data = (
+            f"Análise considerou apenas mensagens a partir de "
+            f"{format_iso_as_dmy(from_date_iso)} (filtro de data inicial). "
+            "Mencione esse filtro na Seção 1 (Resumo executivo)."
+        )
+    else:
+        filtro_data = "Nenhum filtro de data inicial aplicado (todas as mensagens)."
+
     user_msg = (
         "Dados agregados da análise (JSON). Se um bloco vier vazio, marque a seção correspondente como `(sem dados — stub)`.\n\n"
         + filtro
+        + "\n"
+        + filtro_data
         + "\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )

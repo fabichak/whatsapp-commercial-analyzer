@@ -21,7 +21,13 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
-from src.context import Context
+from src.context import (
+    Context,
+    format_iso_as_dmy,
+    parse_user_date,
+    write_pipeline_config,
+)
+from src.exceptions import ConfigError
 from src.prepare import generate_script_yaml
 
 log = logging.getLogger(__name__)
@@ -42,6 +48,8 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
                    help="skip interactive ground-truth labeling")
     p.add_argument("--skip-labels", action="store_true",
                    help="skip interactive label-exclusion prompt")
+    p.add_argument("--skip-from-date", action="store_true",
+                   help="skip interactive from-date prompt")
     p.add_argument("--llm-mode", choices=["max", "api", "hybrid"], default="hybrid")
     p.add_argument("--budget-usd", type=float, default=10.0)
     p.add_argument("--input-dir", type=Path, default=REPO / "input")
@@ -170,6 +178,56 @@ def _step_select_excluded_labels(ctx: Context) -> None:
         print(f"[prepare] invalidated {len(cleared)} artifact(s); Stage 1 will rerun")
 
 
+def _step_from_date(ctx: Context) -> None:
+    cfg_path = ctx.pipeline_config_path
+    current = ctx.from_date
+    if current:
+        print(
+            f"\n[prepare] Current from-date filter: "
+            f"{format_iso_as_dmy(current)} ({current})"
+        )
+        ans = input("Keep this date? [Y/n]: ").strip().lower()
+        if ans in ("", "y", "yes", "s", "sim"):
+            print("[prepare] keeping existing from-date")
+            return
+
+    print(
+        "\n[prepare] Enter the earliest message date to include in the analysis.\n"
+        "Format: dd.mm.yyyy (e.g. 01.03.2026). Blank = no filter (process all)."
+    )
+    while True:
+        raw = input("From-date: ").strip()
+        try:
+            iso = parse_user_date(raw)
+            break
+        except ConfigError as e:
+            print(f"  invalid: {e}. Try again.")
+
+    new_val = iso or None
+    if new_val == current:
+        print("[prepare] from-date unchanged — no-op")
+        return
+
+    write_pipeline_config(cfg_path, new_val)
+    if new_val:
+        print(f"[prepare] wrote {cfg_path} (from_date = {format_iso_as_dmy(new_val)})")
+    else:
+        print(f"[prepare] wrote {cfg_path} (no date filter)")
+
+    # Invalidate Stage 1 artifacts + sentinels so date filter takes effect.
+    cleared: list[Path] = []
+    for rel in ("conversations.jsonl", "conversations_short.jsonl", "chat_labels.json"):
+        p = ctx.data_dir / rel
+        if p.exists():
+            p.unlink()
+            cleared.append(p)
+    for p in ctx.data_dir.glob("stage*.done"):
+        p.unlink()
+        cleared.append(p)
+    if cleared:
+        print(f"[prepare] invalidated {len(cleared)} artifact(s); Stage 1 will rerun")
+
+
 def _step_generate_script(ctx: Context, *, force: bool) -> None:
     out = ctx.script_yaml_path
     if out.exists() and not force:
@@ -211,6 +269,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _step_select_excluded_labels(ctx)
         # Re-build context so ctx.excluded_labels / labels_hash / input_hash
         # reflect the freshly written file.
+        ctx = _build_ctx(ns)
+
+    if not ns.skip_from_date:
+        _step_from_date(ctx)
         ctx = _build_ctx(ns)
 
     if not ns.skip_script:

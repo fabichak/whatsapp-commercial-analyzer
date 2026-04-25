@@ -32,6 +32,7 @@ def _fetch_rows(
     conn: sqlite3.Connection,
     phones: frozenset[str] | None,
     excluded_labels: frozenset[str] = frozenset(),
+    from_date_ms: int | None = None,
 ) -> list[sqlite3.Row]:
     base = (
         "SELECT m._id AS msg_id, m.chat_row_id AS chat_row_id, "
@@ -43,6 +44,9 @@ def _fetch_rows(
         "WHERE m.message_type = 0 AND m.text_data IS NOT NULL AND c.group_type = 0"
     )
     params: tuple[Any, ...] = ()
+    if from_date_ms is not None:
+        base += " AND m.timestamp >= ?"
+        params = params + (from_date_ms,)
     if phones is not None:
         placeholders = ",".join("?" for _ in phones)
         base += f" AND j.user IN ({placeholders})"
@@ -158,7 +162,9 @@ def run(ctx: Context) -> dict:
     try:
         _warn_missing_labels(conn, ctx.excluded_labels)
         excluded_chats_count = _count_excluded_chats(conn, ctx.excluded_labels)
-        rows = _fetch_rows(conn, ctx.phones_filter, ctx.excluded_labels)
+        rows = _fetch_rows(
+            conn, ctx.phones_filter, ctx.excluded_labels, ctx.from_date_ms
+        )
 
         grouped: dict[int, list[sqlite3.Row]] = {}
         for r in rows:
@@ -249,6 +255,7 @@ def run(ctx: Context) -> dict:
                 "excluded_labels": sorted(ctx.excluded_labels),
                 "excluded_chats_count": excluded_chats_count,
                 "kept_chats_count": kept_chats_count,
+                "from_date": ctx.from_date,
             },
             ensure_ascii=False,
             indent=2,

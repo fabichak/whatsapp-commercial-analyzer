@@ -30,6 +30,8 @@ from src.exceptions import BudgetExceeded
 
 log = logging.getLogger(__name__)
 
+RETRY_SLEEP_S = 300
+
 STAGE_MODULES: dict[int, str] = {
     1: "src.load",
     2: "src.dedupe",
@@ -220,11 +222,26 @@ def run_pipeline(ctx: Context, stages: list[int]) -> dict:
         mod = load_stage_module(stage)
         start = time.time()
         print(f"\n{'=' * 60}\n>>> STAGE {stage} START ({STAGE_MODULES[stage]})\n{'=' * 60}")
-        try:
-            result = mod.run(ctx)
-        except BudgetExceeded as e:
-            print(f"<<< STAGE {stage} ABORT (budget): {e}", file=sys.stderr)
-            raise
+        n_errors = 0
+        while True:
+            try:
+                result = mod.run(ctx)
+                break
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
+                n_errors += 1
+                exc_name = type(e).__name__
+                sys.stderr.write(
+                    f"[stage {stage}] number of errors: {n_errors}. Last exception: {exc_name}\n"
+                )
+                sys.stderr.flush()
+                log.exception("stage %d failed (attempt %d), retrying in %ds",
+                              stage, n_errors, RETRY_SLEEP_S)
+                try:
+                    time.sleep(RETRY_SLEEP_S)
+                except KeyboardInterrupt:
+                    raise
         if not isinstance(result, dict):
             result = {"stage": stage, "outputs": []}
         result.setdefault("stage", stage)
